@@ -57,6 +57,47 @@ class Actions(
     fun exists(target: Target, root: AccessibilityNodeInfo? = null): Boolean =
         find(target, root) != null
 
+    /**
+     * 收集**全部**命中 [target] 的节点（上限 [max]）。
+     *
+     * M2 采集评论昵称要用：直播评论里同时有十几条「看起来像昵称」的节点，
+     * 只取第一个等于每次都在关注同一个人。
+     */
+    fun collect(target: Target, max: Int, root: AccessibilityNodeInfo? = null): List<AccessibilityNodeInfo> {
+        if (target.kind == Target.Kind.IMAGE) {
+            LogStore.d(TAG, "图像通道未启用（M2 之后），跳过收集 $target")
+            return emptyList()
+        }
+        val start = root ?: root() ?: return emptyList()
+        val result = ArrayList<AccessibilityNodeInfo>(max)
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.addLast(start)
+        var visited = 0
+        while (queue.isNotEmpty() && visited < MAX_NODES && result.size < max) {
+            val node = queue.removeFirst()
+            visited++
+            if (matches(node, target)) {
+                result += node
+                if (result.size >= max) break
+            }
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.addLast(it) }
+            }
+        }
+        return result
+    }
+
+    /** 节点的可读标签：优先 text，其次 contentDescription。用于从节点里取昵称。 */
+    fun labelOf(node: AccessibilityNodeInfo): String? =
+        textOf(node) ?: descOf(node)
+
+    /** 节点在屏幕上的矩形；无有效 bounds 时返回空 Rect（宽高为 0） */
+    fun boundsOf(node: AccessibilityNodeInfo): Rect = Rect().also { node.getBoundsInScreen(it) }
+
+    fun screenHeight(): Int = service.resources.displayMetrics.heightPixels
+
+    fun screenWidth(): Int = service.resources.displayMetrics.widthPixels
+
     private fun matches(node: AccessibilityNodeInfo, target: Target): Boolean {
         return when (target.kind) {
             Target.Kind.TEXT -> textOf(node) == target.value
@@ -110,7 +151,11 @@ class Actions(
         return click(target)
     }
 
-    private suspend fun tapNode(node: AccessibilityNodeInfo, label: String): Boolean {
+    /**
+     * 点击一个已拿到的节点。公开出来是给「先 collect 再挑一个」的场景用的：
+     * 直播弹幕滚动快，采集到的坐标早已失效，调用方必须用它**当场的** bounds。
+     */
+    suspend fun tapNode(node: AccessibilityNodeInfo, label: String): Boolean {
         val bounds = Rect()
         node.getBoundsInScreen(bounds)
 
@@ -243,6 +288,27 @@ class Actions(
         val deadline = SystemClock.uptimeMillis() + timeoutMs
         while (SystemClock.uptimeMillis() < deadline) {
             find(target)?.let { return it }
+            delay(pollMs)
+        }
+        return null
+    }
+
+    /**
+     * 等待一组目标里任意一个出现，返回先命中的那个。
+     *
+     * 仅用于「等某个东西出现」的场景；要判断「弹层里到底是关注还是已关注」，
+     * 必须带上位置过滤（弹层与直播间背景共用一棵树），见 flows 层的实现。
+     */
+    suspend fun waitForAny(
+        targets: List<Target>,
+        timeoutMs: Long,
+        pollMs: Long = 200
+    ): Target? {
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        while (SystemClock.uptimeMillis() < deadline) {
+            for (target in targets) {
+                if (find(target) != null) return target
+            }
             delay(pollMs)
         }
         return null

@@ -45,13 +45,19 @@ data class PageRule(val name: String, val threshold: Int, val features: List<Fea
 data class LocatorConfig(
     val version: Int,
     val pages: Map<String, PageRule>,
-    val targets: Map<String, Target>
+    val targets: Map<String, Target>,
+    /** 评论采集时要直接丢弃的昵称（自己、主播、角色标签等） */
+    val excludeNicknames: Set<String> = DEFAULT_EXCLUDE_NICKNAMES
 ) {
 
     fun target(name: String): Target? = targets[name]
 
     companion object {
         private const val TAG = "定位配置"
+
+        val DEFAULT_EXCLUDE_NICKNAMES: Set<String> = setOf(
+            "我", "作者", "主播", "管理员", "房管", "粉丝团"
+        )
 
         fun parse(root: JSONObject): LocatorConfig {
             val version = root.optInt("version", 0)
@@ -103,7 +109,14 @@ data class LocatorConfig(
             }
 
             if (pages.isEmpty()) throw IllegalArgumentException("有效页面规则为 0")
-            return LocatorConfig(version, pages, targets)
+
+            val exclude = root.optJSONArray("excludeNicknames")?.let { array ->
+                (0 until array.length())
+                    .mapNotNull { array.optString(it)?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                    .toSet()
+            }?.takeIf { it.isNotEmpty() } ?: DEFAULT_EXCLUDE_NICKNAMES
+
+            return LocatorConfig(version, pages, targets, exclude)
         }
 
         private fun parseTarget(obj: JSONObject): Target? {

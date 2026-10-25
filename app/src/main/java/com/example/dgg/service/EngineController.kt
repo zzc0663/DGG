@@ -2,7 +2,7 @@ package com.example.dgg.service
 
 import android.content.Context
 import com.example.dgg.data.LogStore
-import com.example.dgg.engine.Step
+import com.example.dgg.engine.Flow
 import com.example.dgg.engine.TaskEngine
 import com.example.dgg.util.AppPermissions
 import com.example.dgg.util.DouyinLauncher
@@ -20,7 +20,7 @@ object EngineController {
 
     private const val TAG = "任务控制"
 
-    fun start(context: Context, steps: List<Step>, launchDouyin: Boolean = true): Result<Unit> {
+    fun start(context: Context, flow: Flow, launchDouyin: Boolean = true): Result<Unit> {
         val app = context.applicationContext
 
         if (!DggAccessibilityService.isConnected()) {
@@ -36,16 +36,16 @@ object EngineController {
 
         if (launchDouyin) {
             if (DouyinLauncher.launch(app)) {
-                LogStore.i(TAG, "已拉起抖音，等待首页就绪")
+                LogStore.i(TAG, "已拉起抖音，等待目标界面就绪")
             } else {
                 LogStore.w(TAG, "拉起抖音失败，将依赖用户手动切到抖音")
             }
         }
 
-        TaskEngine.start(app, steps)
+        TaskEngine.start(app, flow)
         if (!TaskEngine.isRunning) {
             ControlService.stop(app, "启动失败")
-            return Result.failure(IllegalStateException("任务未能启动，原因见运行日志"))
+            return Result.failure(IllegalStateException("流程未能启动，原因见运行日志"))
         }
 
         if (AppPermissions.canDrawOverlays(app)) {

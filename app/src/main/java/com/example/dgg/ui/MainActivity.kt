@@ -24,10 +24,12 @@ import com.example.dgg.databinding.ActivityMainBinding
 import com.example.dgg.engine.Actions
 import com.example.dgg.engine.EngineProgress
 import com.example.dgg.engine.EngineState
+import com.example.dgg.engine.Flow
 import com.example.dgg.engine.LocatorConfigLoader
 import com.example.dgg.engine.PageDetector
 import com.example.dgg.engine.SmokeFlow
 import com.example.dgg.engine.TaskEngine
+import com.example.dgg.engine.flow.FollowFromLiveFlow
 import com.example.dgg.engine.risk.Humanizer
 import com.example.dgg.service.DggAccessibilityService
 import com.example.dgg.service.EngineController
@@ -50,9 +52,9 @@ import java.util.Locale
 /**
  * 主界面：三个页签 + 参数双向绑定 + 权限状态实时渲染 + 引擎状态跟随。
  *
- * 边界（M1）：界面上「开始服务」启动的是**自检流程**——拉起抖音、搜索关键词、
- * 切到「用户」tab，用来验证定位与操作链路是否成立。它不会关注任何人，
- * 自动关注闭环在 M2 接入。这个区别在弹窗里明说，不做含糊的成功提示。
+ * 边界（M2）：「开始服务」启动的是**直播间评论关注**——需要用户自己先进好直播间，
+ * 脚本只负责读评论、随机挑人、关注、回直播间。目标数/日上限/间隔/休息全部复用本页参数；
+ * 不会私信、点赞、刷评论，也不会自己去找直播间。
  */
 class MainActivity : AppCompatActivity() {
 
@@ -405,7 +407,7 @@ class MainActivity : AppCompatActivity() {
                     LogStore.i(TAG, "点击「继续」")
                 }
 
-                else -> confirmAndStartSmokeFlow()
+                else -> confirmAndStartFollow()
             }
         }
 
@@ -471,61 +473,64 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * 「开始服务」在 M1 阶段只跑自检流程。必须先说清楚它不会关注任何人——
-     * 让用户以为已经在涨粉，是这类工具最不能犯的错。
-     */
-    private fun confirmAndStartSmokeFlow() {
+    /** 「开始服务」= M2 主业务：直播间评论随机关注 */
+    private fun confirmAndStartFollow() {
+        val s = store.current
         AlertDialog.Builder(this)
-            .setTitle("开始服务（M1 自检）")
+            .setTitle("开始关注")
             .setMessage(
-                "当前阶段接入的是自检流程：拉起抖音 → 搜索关键词「${SmokeFlow.DEFAULT_KEYWORD}」" +
-                    " → 切到「用户」tab。\n\n" +
-                    "它只验证界面定位与操作链路是否成立，不会替你关注任何人——" +
-                    "自动关注流程在 M2 接入。\n\n" +
+                "开始前请确认：你已经在抖音里手动进入目标直播间，并停在直播间画面。\n\n" +
+                    "脚本会循环执行：读直播间评论 → 随机挑一个人 → 点开资料卡 → 关注 → 回直播间。" +
+                    "达到「目标关注数量 ${s.followTarget}」或「今日上限 ${s.dailyLimit}」时停止。\n\n" +
+                    "不会私信、不会点赞、不会刷评论，也不会自己去找直播间。\n\n" +
                     "运行期间屏幕会被自动操作，请勿手动干扰；随时可用悬浮窗或通知栏停止。"
             )
-            .setPositiveButton("开始") { _, _ -> startSmokeFlow() }
+            .setPositiveButton("开始") { _, _ -> startFlow(FollowFromLiveFlow(), "已启动直播关注") }
             .setNegativeButton("取消", null)
             .show()
     }
 
-    private fun startSmokeFlow() {
-        LogStore.i(TAG, "启动 M1 自检流程")
-        EngineController.start(this, SmokeFlow.build())
-            .onSuccess {
-                toast("自检流程已启动，请勿手动操作抖音")
-            }
-            .onFailure { error ->
-                val reason = error.message ?: "启动失败"
-                LogStore.e(TAG, "启动被拒绝：$reason")
-                AlertDialog.Builder(this)
-                    .setTitle("无法开始")
-                    .setMessage(
-                        buildString {
-                            append(reason)
-                            append("\n\n")
-                            if (!DggAccessibilityService.isConnected()) {
-                                append("请先点「无障碍」一栏的「去授权」，在系统设置中找到「抖关关 自动化」并开启。")
-                            } else {
-                                append("详细原因见运行日志。")
-                            }
-                        }
-                    )
-                    .setPositiveButton("知道了", null)
-                    .show()
-            }
+    private fun startFlow(flow: Flow, successHint: String) {
+        LogStore.i(TAG, "启动流程「${flow.name}」")
+        EngineController.start(this, flow)
+            .onSuccess { toast(successHint) }
+            .onFailure { error -> showStartFailure(error.message ?: "启动失败") }
     }
 
-    /** 悬浮菜单：M1 阶段只放排障要用的三件事，不做花架子 */
+    private fun showStartFailure(reason: String) {
+        LogStore.e(TAG, "启动被拒绝：$reason")
+        AlertDialog.Builder(this)
+            .setTitle("无法开始")
+            .setMessage(
+                buildString {
+                    append(reason)
+                    append("\n\n")
+                    if (!DggAccessibilityService.isConnected()) {
+                        append("请先点「无障碍」一栏的「去授权」，在系统设置中找到「抖关关 自动化」并开启。")
+                    } else {
+                        append("详细原因见运行日志。")
+                    }
+                }
+            )
+            .setPositiveButton("知道了", null)
+            .show()
+    }
+
+    /** 悬浮菜单：排障入口。「搜索链路自检」M2 之后仍然有用，可单独验证定位是否还活着 */
     private fun showSelfCheckMenu() {
-        val items = arrayOf("识别当前页面（只读，不发任何操作）", "打开系统无障碍设置", "查看运行日志")
+        val items = arrayOf(
+            "识别当前页面（只读，不发任何操作）",
+            "搜索链路自检（首页 → 搜索 → 用户 tab）",
+            "打开系统无障碍设置",
+            "查看运行日志"
+        )
         AlertDialog.Builder(this)
             .setTitle("自检")
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> detectCurrentPage()
-                    1 -> openPermission(PermissionCardView.Kind.ACCESSIBILITY)
+                    1 -> startFlow(SmokeFlow.build(), "自检流程已启动（只验定位，不关注任何人）")
+                    2 -> openPermission(PermissionCardView.Kind.ACCESSIBILITY)
                     else -> startActivity(Intent(this, LogActivity::class.java))
                 }
             }

@@ -1,7 +1,8 @@
 {
   "_note": "抖音页面定位规则。数值均为待真机校准的初版假设，未在真实抖音上验证。改版或失效时只改本文件，不必重新打包。字段说明见 docs/定位配置说明.md",
   "_unverified": true,
-  "version": 1,
+  "version": 2,
+  "excludeNicknames": ["我", "作者", "主播", "管理员", "房管", "粉丝团"],
   "pages": {
     "HOME": {
       "threshold": 5,
@@ -52,7 +53,14 @@
     "search_input": { "type": "textContains", "value": "搜索" },
     "search_confirm": { "type": "text", "value": "搜索" },
     "user_tab": { "type": "text", "value": "用户" },
+
     "follow_button": { "type": "text", "value": "关注" },
+    "followed_button": { "type": "text", "value": "已关注" },
+    "close_card": { "type": "descContains", "value": "关闭" },
+
+    "live_comment_nickname": { "type": "id", "value": "com.ss.android.ugc.aweme:id/nickname" },
+    "live_comment_line": { "type": "textContains", "value": "：" },
+
     "comment_input": { "type": "textContains", "value": "说点什么" },
     "back": { "type": "descContains", "value": "返回" }
   }
