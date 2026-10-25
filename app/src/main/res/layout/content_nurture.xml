@@ -16,7 +16,11 @@
         android:paddingEnd="12dp"
         android:paddingBottom="8dp">
 
-        <include layout="@layout/part_permission_card" />
+        <com.example.dgg.ui.PermissionCardView
+            android:id="@+id/perm_card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="10dp" />
 
         <!-- ==================== 运行设置 ==================== -->
         <LinearLayout

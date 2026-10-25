@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    style="@style/CardBox"
-    android:layout_marginBottom="10dp">
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical">
 
-    <!-- 标题行：权限设置 + 保活设置提示 -->
+    <!-- 标题行：权限设置 + 保活设置入口 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -22,9 +23,14 @@
             android:background="@drawable/bg_dot_red" />
 
         <TextView
+            android:id="@+id/tv_keep_alive"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginStart="5dp"
+            android:background="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            android:padding="4dp"
             android:text="保活设置"
             android:textColor="@color/brand_red"
             android:textSize="12sp" />
@@ -34,11 +40,12 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="14dp"
+        android:layout_marginTop="12dp"
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
         <View
+            android:id="@+id/dot_accessibility"
             android:layout_width="6dp"
             android:layout_height="6dp"
             android:layout_marginEnd="8dp"
@@ -55,31 +62,32 @@
                 android:text="无障碍服务" />
 
             <TextView
+                android:id="@+id/tv_accessibility_status"
                 style="@style/TxtRowSub"
                 android:layout_marginTop="3dp"
-                android:text="未授权"
-                android:textColor="@color/brand_red" />
+                android:text="检测中…" />
         </LinearLayout>
 
         <TextView
+            android:id="@+id/btn_accessibility"
             style="@style/BtnPermSmall"
-            android:onClick="onPermissionTap"
-            android:text="未授权" />
+            android:text="去授权" />
     </LinearLayout>
 
     <!-- 悬浮窗权限 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="10dp"
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
         <View
+            android:id="@+id/dot_overlay"
             android:layout_width="6dp"
             android:layout_height="6dp"
             android:layout_marginEnd="8dp"
-            android:background="@drawable/bg_dot_green" />
+            android:background="@drawable/bg_dot_red" />
 
         <LinearLayout
             android:layout_width="0dp"
@@ -92,16 +100,54 @@
                 android:text="悬浮窗权限" />
 
             <TextView
+                android:id="@+id/tv_overlay_status"
                 style="@style/TxtRowSub"
                 android:layout_marginTop="3dp"
-                android:text="已授权"
-                android:textColor="@color/dot_green" />
+                android:text="检测中…" />
         </LinearLayout>
 
         <TextView
+            android:id="@+id/btn_overlay"
             style="@style/BtnPermSmall"
-            android:onClick="onPermissionTap"
-            android:text="已授权" />
+            android:text="去授权" />
+    </LinearLayout>
+
+    <!-- 通知权限（前台服务保活依赖，参考图未画，功能必需故补） -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <View
+            android:id="@+id/dot_notification"
+            android:layout_width="6dp"
+            android:layout_height="6dp"
+            android:layout_marginEnd="8dp"
+            android:background="@drawable/bg_dot_red" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                style="@style/TxtRowTitle"
+                android:text="通知权限" />
+
+            <TextView
+                android:id="@+id/tv_notification_status"
+                style="@style/TxtRowSub"
+                android:layout_marginTop="3dp"
+                android:text="检测中…" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/btn_notification"
+            style="@style/BtnPermSmall"
+            android:text="去授权" />
     </LinearLayout>
 
 </LinearLayout>

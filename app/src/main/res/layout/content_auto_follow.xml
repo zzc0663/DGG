@@ -16,7 +16,11 @@
         android:paddingEnd="12dp"
         android:paddingBottom="8dp">
 
-        <include layout="@layout/part_permission_card" />
+        <com.example.dgg.ui.PermissionCardView
+            android:id="@+id/perm_card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="10dp" />
 
         <!-- ==================== 参数设置 ==================== -->
         <LinearLayout
@@ -91,6 +95,49 @@
                         style="@style/InputBox"
                         android:layout_marginTop="6dp"
                         android:text="1500" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- 反风控参数：日上限 + 延迟抖动 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="horizontal">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        style="@style/TxtFieldLabel"
+                        android:text="每日关注上限" />
+
+                    <EditText
+                        android:id="@+id/et_daily_limit"
+                        style="@style/InputBox"
+                        android:layout_marginTop="6dp"
+                        android:text="200" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        style="@style/TxtFieldLabel"
+                        android:text="延迟抖动（%）" />
+
+                    <EditText
+                        android:id="@+id/et_jitter"
+                        style="@style/InputBox"
+                        android:layout_marginTop="6dp"
+                        android:text="30" />
                 </LinearLayout>
             </LinearLayout>
 
@@ -306,10 +353,9 @@
                     android:textColor="@color/text_secondary" />
 
                 <TextView
+                    android:id="@+id/tv_license_status"
                     style="@style/TxtValue"
-                    android:text="已授权"
-                    android:textColor="@color/success_green"
-                    android:textStyle="bold" />
+                    android:text="检测中…" />
             </LinearLayout>
 
             <View
@@ -332,8 +378,9 @@
                     android:textColor="@color/text_secondary" />
 
                 <TextView
+                    android:id="@+id/tv_license_expire"
                     style="@style/TxtValue"
-                    android:text="2027-04-24 17:33:42" />
+                    android:text="—" />
             </LinearLayout>
 
             <View
@@ -356,10 +403,11 @@
                     android:textColor="@color/text_secondary" />
 
                 <TextView
+                    android:id="@+id/tv_license_code"
                     style="@style/TxtValue"
                     android:layout_width="0dp"
                     android:layout_weight="1"
-                    android:text="••••••••"
+                    android:text="—"
                     android:textColor="@color/text_tertiary" />
 
                 <ImageView
