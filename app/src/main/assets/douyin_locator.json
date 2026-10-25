@@ -1,0 +1,59 @@
+{
+  "_note": "抖音页面定位规则。数值均为待真机校准的初版假设，未在真实抖音上验证。改版或失效时只改本文件，不必重新打包。字段说明见 docs/定位配置说明.md",
+  "_unverified": true,
+  "version": 1,
+  "pages": {
+    "HOME": {
+      "threshold": 5,
+      "features": [
+        { "w": 3, "type": "text", "value": "首页" },
+        { "w": 3, "type": "text", "value": "朋友" },
+        { "w": 2, "type": "descContains", "value": "消息" },
+        { "w": 1, "type": "text", "value": "我" }
+      ]
+    },
+    "SEARCH": {
+      "threshold": 4,
+      "features": [
+        { "w": 3, "type": "textContains", "value": "搜索" },
+        { "w": 2, "type": "text", "value": "取消" },
+        { "w": 2, "type": "text", "value": "猜你想搜" }
+      ]
+    },
+    "SEARCH_RESULT": {
+      "threshold": 5,
+      "features": [
+        { "w": 3, "type": "text", "value": "综合" },
+        { "w": 2, "type": "text", "value": "视频" },
+        { "w": 3, "type": "text", "value": "用户" },
+        { "w": 2, "type": "textContains", "value": "粉丝" }
+      ]
+    },
+    "USER_PROFILE": {
+      "threshold": 5,
+      "features": [
+        { "w": 2, "type": "textContains", "value": "粉丝" },
+        { "w": 2, "type": "textContains", "value": "获赞" },
+        { "w": 3, "type": "text", "value": "关注" },
+        { "w": 1, "type": "text", "value": "作品" }
+      ]
+    },
+    "LIVE_ROOM": {
+      "threshold": 4,
+      "features": [
+        { "w": 3, "type": "textContains", "value": "说点什么" },
+        { "w": 2, "type": "textContains", "value": "在线" },
+        { "w": 2, "type": "textContains", "value": "送礼" }
+      ]
+    }
+  },
+  "targets": {
+    "search_entry": { "type": "descContains", "value": "搜索" },
+    "search_input": { "type": "textContains", "value": "搜索" },
+    "search_confirm": { "type": "text", "value": "搜索" },
+    "user_tab": { "type": "text", "value": "用户" },
+    "follow_button": { "type": "text", "value": "关注" },
+    "comment_input": { "type": "textContains", "value": "说点什么" },
+    "back": { "type": "descContains", "value": "返回" }
+  }
+}

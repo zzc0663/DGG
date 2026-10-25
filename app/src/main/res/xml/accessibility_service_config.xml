@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  无障碍服务配置。
+  关键点：
+  - canRetrieveWindowContent 必须为 true，否则拿不到节点树；
+  - flagReportViewIds 让节点带 viewIdResourceName，才能按 id 定位；
+  - flagIncludeNotImportantViews 让抖音那种大量 isImportant=false 的容器也出现在树里，
+    否则很多文本节点会被过滤掉，定位频繁失败。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/accessibility_service_description"
+    android:notificationTimeout="100"
+    android:summary="@string/accessibility_service_summary" />

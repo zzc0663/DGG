@@ -1,12 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- 保活引导：直接跳到「忽略电池优化」授权页 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- 前台服务通知（API 33+ 为运行时权限，不申请则通知不可见） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 前台服务本体 + specialUse 类型（API 34+ 必须显式声明类型权限） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- 状态悬浮窗（特殊权限，走 Settings 授权，不是运行时权限） -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:allowBackup="true"
@@ -33,6 +39,44 @@
             android:name=".ui.LogActivity"
             android:exported="false"
             android:screenOrientation="portrait" />
+
+        <!--
+          无障碍服务。特点：
+          - exported 必须为 true，否则系统设置页看不到它；
+          - permission 必须是 BIND_ACCESSIBILITY_SERVICE，这是防止任意应用绑定本服务的唯一保障；
+          - meta-data 指向配置，能力声明（读窗口内容 / 手势）全在那里。
+        -->
+        <service
+            android:name=".service.DggAccessibilityService"
+            android:exported="true"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!--
+          前台服务。specialUse 不是「免死金牌」，Play 审核会看子类型说明，
+          这里的 reason 写清楚：自动化会话期间常驻状态通知。
+        -->
+        <service
+            android:name=".service.ControlService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="accessibility_automation_session" />
+        </service>
+
+        <!-- 状态悬浮窗。与前台服务同进程，进程被前台服务钉住 -->
+        <service
+            android:name=".service.FloatWindowService"
+            android:exported="false" />
 
         <!-- 日志导出：把 cache/logs 下的 txt 以 content:// 分享出去 -->
         <provider

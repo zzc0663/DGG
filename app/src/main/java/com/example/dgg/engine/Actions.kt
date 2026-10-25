@@ -1,0 +1,280 @@
+package com.example.dgg.engine
+
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
+import android.graphics.Point
+import android.graphics.Rect
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.view.accessibility.AccessibilityNodeInfo
+import com.example.dgg.data.LogStore
+import com.example.dgg.engine.risk.Humanizer
+import com.example.dgg.util.DouyinLauncher
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.math.abs
+
+/**
+ * 原子操作层：定位 + 点击 + 滑动 + 输入 + 等待。
+ *
+ * 两条设计约束：
+ * 1. **不盲点**。定位不到就返回 false，由上层决定重试或停机；这里绝不「凭坐标猜一下」。
+ * 2. **动作用手势而不是 ACTION_CLICK**。ACTION_CLICK 的落点是控件中心，千次如一次，
+ *    是最容易被识别的行为特征；手势可以带随机偏移与随机按压时长。
+ *    仅在控件无有效 bounds 或手势派发失败时才退化为 ACTION_CLICK。
+ */
+class Actions(
+    private val service: AccessibilityService,
+    private val humanizer: Humanizer
+) {
+
+    private val handler = Handler(Looper.getMainLooper())
+
+    // ==================== 定位 ====================
+
+    fun root(): AccessibilityNodeInfo? = runCatching { service.rootInActiveWindow }.getOrNull()
+
+    fun foregroundPackage(): String? = root()?.packageName?.toString()
+
+    fun isDouyinForeground(): Boolean = foregroundPackage() == DouyinLauncher.PACKAGE
+
+    /**
+     * 在 [root] 子树里按 [target] 查找节点。IMAGE 类型在 M1 恒不命中（图像通道 M2 接入）。
+     */
+    fun find(target: Target, root: AccessibilityNodeInfo? = root()): AccessibilityNodeInfo? {
+        if (target.kind == Target.Kind.IMAGE) {
+            LogStore.d(TAG, "图像通道未启用（M2），跳过 $target")
+            return null
+        }
+        val start = root ?: return null
+        return findBy(start) { node -> matches(node, target) }
+    }
+
+    fun exists(target: Target, root: AccessibilityNodeInfo? = null): Boolean =
+        find(target, root) != null
+
+    private fun matches(node: AccessibilityNodeInfo, target: Target): Boolean {
+        return when (target.kind) {
+            Target.Kind.TEXT -> textOf(node) == target.value
+            Target.Kind.TEXT_CONTAINS -> textOf(node)?.contains(target.value) == true
+            Target.Kind.DESC -> descOf(node) == target.value
+            Target.Kind.DESC_CONTAINS -> descOf(node)?.contains(target.value) == true
+            Target.Kind.ID -> node.viewIdResourceName == target.value
+            Target.Kind.IMAGE -> false
+        }
+    }
+
+    /**
+     * 广度优先遍历。抖音的节点树很深且大量节点被标记为 not important，
+     * 所以在 accessibility_service_config 里开了 flagIncludeNotImportantViews。
+     */
+    private fun findBy(
+        root: AccessibilityNodeInfo,
+        predicate: (AccessibilityNodeInfo) -> Boolean
+    ): AccessibilityNodeInfo? {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.addLast(root)
+        var visited = 0
+        while (queue.isNotEmpty() && visited < MAX_NODES) {
+            val node = queue.removeFirst()
+            visited++
+            if (predicate(node)) return node
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.addLast(it) }
+            }
+        }
+        return null
+    }
+
+    // ==================== 点击 ====================
+
+    suspend fun click(target: Target): Boolean {
+        val node = find(target)
+        if (node == null) {
+            LogStore.w(TAG, "未找到目标 $target")
+            return false
+        }
+        return tapNode(node, target.toString())
+    }
+
+    suspend fun clickByName(name: String, config: LocatorConfig): Boolean {
+        val target = config.target(name)
+        if (target == null) {
+            LogStore.e(TAG, "配置中不存在目标 $name")
+            return false
+        }
+        return click(target)
+    }
+
+    private suspend fun tapNode(node: AccessibilityNodeInfo, label: String): Boolean {
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+
+        if (bounds.width() > 0 && bounds.height() > 0) {
+            val point = humanizer.pointIn(bounds)
+            if (dispatchTap(point)) {
+                LogStore.d(TAG, "点击 $label @ ($point) 落点并非正中")
+                return true
+            }
+        }
+
+        // 退化路径：控件无有效 bounds，或手势被系统拒绝
+        val ok = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        LogStore.w(TAG, "手势点击不可用，退化为 ACTION_CLICK：$label → $ok")
+        return ok
+    }
+
+    private suspend fun dispatchTap(point: Point): Boolean {
+        val path = Path().apply { moveTo(point.x.toFloat(), point.y.toFloat()) }
+        val stroke = GestureDescription.StrokeDescription(path, 0, humanizer.tapDurationMs())
+        return dispatch(GestureDescription.Builder().addStroke(stroke).build())
+    }
+
+    // ==================== 滑动 ====================
+
+    /** 上滑：从下方 72% 划到上方 28%，用于列表翻页 */
+    suspend fun swipeUp(): Boolean {
+        val dm = service.resources.displayMetrics
+        val cx = dm.widthPixels / 2
+        return swipe(
+            fromX = cx,
+            fromY = (dm.heightPixels * 0.72f).toInt(),
+            toX = cx,
+            toY = (dm.heightPixels * 0.28f).toInt()
+        )
+    }
+
+    suspend fun swipeDown(): Boolean {
+        val dm = service.resources.displayMetrics
+        val cx = dm.widthPixels / 2
+        return swipe(
+            fromX = cx,
+            fromY = (dm.heightPixels * 0.30f).toInt(),
+            toX = cx,
+            toY = (dm.heightPixels * 0.70f).toInt()
+        )
+    }
+
+    /** 多段折线滑动：段数与横向漂移都随机，避免出现笔直的机器轨迹 */
+    suspend fun swipe(fromX: Int, fromY: Int, toX: Int, toY: Int): Boolean {
+        val segments = humanizer.swipeSegments()
+        val drift = (abs(toY - fromY) * DRIFT_RATIO).toInt().coerceAtLeast(4)
+
+        val path = Path().apply { moveTo(fromX.toFloat(), fromY.toFloat()) }
+        for (i in 1..segments) {
+            val t = i.toFloat() / segments
+            val x = fromX + (toX - fromX) * t
+            val y = fromY + (toY - fromY) * t
+            val jitter = if (i < segments) humanizer.driftPx(drift).toFloat() else 0f
+            path.lineTo(x + jitter, y)
+        }
+
+        val stroke = GestureDescription.StrokeDescription(path, 0, humanizer.swipeDurationMs())
+        val ok = dispatch(GestureDescription.Builder().addStroke(stroke).build())
+        LogStore.d(TAG, "滑动 ($fromX,$fromY)→($toX,$toY) ${if (ok) "成功" else "失败"}")
+        return ok
+    }
+
+    // ==================== 输入 ====================
+
+    /**
+     * 逐字输入。
+     *
+     * 没有直接用一次 ACTION_SET_TEXT 写整串：那样界面上是「瞬间出现」，
+     * 与真人逐键输入的特征完全不同。这里每个字符累积一次并留 80–200ms 间隔。
+     */
+    suspend fun typeText(target: Target, text: String): Boolean {
+        // 刻意声明为非空类型：循环里可能因界面刷新而重新定位，
+        // 用可空 var 会让编译器在第二次迭代就失去非空智能转换（跨迭代赋值）。
+        var node: AccessibilityNodeInfo = find(target) ?: run {
+            LogStore.w(TAG, "未找到输入框 $target")
+            return false
+        }
+        if (!node.isEditable) {
+            LogStore.w(TAG, "$target 不是可编辑节点，仍尝试 SET_TEXT")
+        }
+
+        val accumulated = StringBuilder()
+        for (ch in text) {
+            accumulated.append(ch)
+            val args = Bundle().apply {
+                putCharSequence(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                    accumulated.toString()
+                )
+            }
+            var ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            if (!ok) {
+                // 节点可能因界面刷新而失效，重新定位一次再试
+                val refreshed = find(target)
+                if (refreshed != null) {
+                    node = refreshed
+                    ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                }
+            }
+            if (!ok) {
+                LogStore.e(TAG, "输入被拒绝，已输入「$accumulated」")
+                return false
+            }
+            delay(humanizer.charDelayMs())
+        }
+        LogStore.d(TAG, "输入完成：\"$text\"（逐字 ${text.length} 次）")
+        return true
+    }
+
+    // ==================== 其他 ====================
+
+    fun back(): Boolean {
+        val ok = service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        LogStore.d(TAG, "返回键 → $ok")
+        return ok
+    }
+
+    /** 轮询等待目标出现，超时返回 null（由上层决定是否重试） */
+    suspend fun waitFor(
+        target: Target,
+        timeoutMs: Long,
+        pollMs: Long = 200
+    ): AccessibilityNodeInfo? {
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        while (SystemClock.uptimeMillis() < deadline) {
+            find(target)?.let { return it }
+            delay(pollMs)
+        }
+        return null
+    }
+
+    private suspend fun dispatch(gesture: GestureDescription): Boolean =
+        suspendCancellableCoroutine { cont ->
+            val callback = object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    if (cont.isActive) cont.resume(true)
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    if (cont.isActive) cont.resume(false)
+                }
+            }
+            val dispatched = runCatching { service.dispatchGesture(gesture, callback, handler) }
+                .getOrDefault(false)
+            if (!dispatched && cont.isActive) cont.resume(false)
+        }
+
+    private fun textOf(node: AccessibilityNodeInfo): String? =
+        node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+
+    private fun descOf(node: AccessibilityNodeInfo): String? =
+        node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+
+    private companion object {
+        const val TAG = "操作"
+        const val MAX_NODES = 800
+
+        /** 滑动横向漂移相对纵向距离的比例 */
+        const val DRIFT_RATIO = 0.03f
+    }
+}
