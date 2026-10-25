@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 品牌色 -->
+    <color name="brand_red">#E1251B</color>
+    <color name="brand_red_dark">#C01C13</color>
+    <color name="brand_red_pale">#FFF1F0</color>
+
+    <!-- 背景 -->
+    <color name="page_bg">#F5F6F8</color>
+    <color name="card_bg">#FFFFFF</color>
+    <color name="input_bg">#F3F4F6</color>
+    <color name="hint_bg">#FAFAFB</color>
+    <color name="segment_bg">#F3F4F6</color>
+    <color name="switch_track_off">#E4E6EA</color>
+    <color name="switch_track_on">#4DE1251B</color>
+
+    <!-- 文字 -->
+    <color name="text_primary">#1A1A1A</color>
+    <color name="text_secondary">#8A8F99</color>
+    <color name="text_tertiary">#B3B7BE</color>
+
+    <!-- 线条 -->
+    <color name="divider">#F0F1F3</color>
+
+    <!-- 状态 -->
+    <color name="dot_green">#2EBD59</color>
+    <color name="success_green">#22A94E</color>
+    <color name="warning_amber">#C98A16</color>
+
+    <color name="white">#FFFFFFFF</color>
+    <color name="black">#FF000000</color>
+</resources>

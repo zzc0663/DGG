@@ -1,0 +1,19 @@
+# 统一换行：本机 git 全局 core.autocrlf=true，若不钉死会让 gradlew 被转成 CRLF，
+# 换机器 clone 后 ./gradlew 直接报 "/bin/sh^M: bad interpreter"
+* text=auto eol=lf
+
+# Windows 批处理必须 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Unix 脚本必须 LF
+gradlew text eol=lf
+
+# 二进制，禁止转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.jar binary
+*.zip binary
+*.apk binary

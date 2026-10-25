@@ -1,0 +1,21 @@
+# ===== Gradle / Kotlin =====
+.gradle/
+build/
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# ===== 本机配置（含 sdk.dir 等本机路径，禁止入库）=====
+local.properties
+
+# ===== IDE =====
+*.iml
+.idea/
+
+# ===== 系统 =====
+.DS_Store
+Thumbs.db
+
+# ===== Agent 会话数据 =====
+.workbuddy/

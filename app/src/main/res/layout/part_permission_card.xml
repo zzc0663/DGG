@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    style="@style/CardBox"
+    android:layout_marginBottom="10dp">
+
+    <!-- 标题行：权限设置 + 保活设置提示 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            style="@style/TxtSection"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:text="权限设置" />
+
+        <View
+            android:layout_width="5dp"
+            android:layout_height="5dp"
+            android:background="@drawable/bg_dot_red" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="5dp"
+            android:text="保活设置"
+            android:textColor="@color/brand_red"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <!-- 无障碍服务 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <View
+            android:layout_width="6dp"
+            android:layout_height="6dp"
+            android:layout_marginEnd="8dp"
+            android:background="@drawable/bg_dot_red" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                style="@style/TxtRowTitle"
+                android:text="无障碍服务" />
+
+            <TextView
+                style="@style/TxtRowSub"
+                android:layout_marginTop="3dp"
+                android:text="未授权"
+                android:textColor="@color/brand_red" />
+        </LinearLayout>
+
+        <TextView
+            style="@style/BtnPermSmall"
+            android:onClick="onPermissionTap"
+            android:text="未授权" />
+    </LinearLayout>
+
+    <!-- 悬浮窗权限 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <View
+            android:layout_width="6dp"
+            android:layout_height="6dp"
+            android:layout_marginEnd="8dp"
+            android:background="@drawable/bg_dot_green" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                style="@style/TxtRowTitle"
+                android:text="悬浮窗权限" />
+
+            <TextView
+                style="@style/TxtRowSub"
+                android:layout_marginTop="3dp"
+                android:text="已授权"
+                android:textColor="@color/dot_green" />
+        </LinearLayout>
+
+        <TextView
+            style="@style/BtnPermSmall"
+            android:onClick="onPermissionTap"
+            android:text="已授权" />
+    </LinearLayout>
+
+</LinearLayout>

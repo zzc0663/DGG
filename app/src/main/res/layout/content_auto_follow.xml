@@ -1,0 +1,384 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/page_bg"
+    android:fillViewport="true"
+    android:scrollbars="none">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="12dp"
+        android:paddingTop="12dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="8dp">
+
+        <include layout="@layout/part_permission_card" />
+
+        <!-- ==================== 参数设置 ==================== -->
+        <LinearLayout
+            style="@style/CardBox"
+            android:layout_marginBottom="10dp">
+
+            <TextView
+                style="@style/TxtSection"
+                android:text="参数设置" />
+
+            <TextView
+                style="@style/TxtFieldLabel"
+                android:layout_marginTop="14dp"
+                android:text="校准模式" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:background="@drawable/bg_segment_group"
+                android:orientation="horizontal"
+                android:padding="3dp">
+
+                <TextView
+                    android:id="@+id/seg_manual_cal"
+                    style="@style/SegItem"
+                    android:text="手动校准" />
+
+                <TextView
+                    android:id="@+id/seg_auto_cal"
+                    style="@style/SegItemSelected"
+                    android:text="自动校准" />
+            </LinearLayout>
+
+            <!-- 双列输入 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:orientation="horizontal">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        style="@style/TxtFieldLabel"
+                        android:text="目标关注数量" />
+
+                    <EditText
+                        android:id="@+id/et_follow_target"
+                        style="@style/InputBox"
+                        android:layout_marginTop="6dp"
+                        android:text="200" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        style="@style/TxtFieldLabel"
+                        android:text="扫描间隔" />
+
+                    <EditText
+                        android:id="@+id/et_scan_interval"
+                        style="@style/InputBox"
+                        android:layout_marginTop="6dp"
+                        android:text="1500" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- 空闲时直播互动 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        style="@style/TxtRowTitle"
+                        android:text="空闲时直播互动" />
+
+                    <TextView
+                        style="@style/TxtRowSub"
+                        android:layout_marginTop="4dp"
+                        android:text="扫不到新用户时自动评论互动" />
+                </LinearLayout>
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/sw_idle_live"
+                    style="@style/AppSwitch" />
+            </LinearLayout>
+
+            <!-- 配置引导条 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/bg_hint"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="10dp"
+                android:paddingTop="9dp"
+                android:paddingEnd="10dp"
+                android:paddingBottom="9dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="💡"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:text="评论参数请在「直播互动」页签配置"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tv_go_config"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:text="去配置 ›"
+                    android:textColor="@color/warning_amber"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- 自动申请连麦 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        style="@style/TxtRowTitle"
+                        android:text="自动申请连麦" />
+
+                    <TextView
+                        style="@style/TxtRowSub"
+                        android:layout_marginTop="4dp"
+                        android:text="启动后自动点击申请连麦按钮" />
+                </LinearLayout>
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/sw_apply_mic"
+                    style="@style/AppSwitch" />
+            </LinearLayout>
+
+            <!-- 下麦后继续干活 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        style="@style/TxtRowTitle"
+                        android:text="下麦后继续干活" />
+
+                    <TextView
+                        style="@style/TxtRowSub"
+                        android:layout_marginTop="4dp"
+                        android:text="关注数未达标下麦后自动恢复关注" />
+                </LinearLayout>
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/sw_continue_after_mic"
+                    style="@style/AppSwitch" />
+            </LinearLayout>
+
+            <!-- 定时关注间隔 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtRowTitle"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:text="定时关注间隔" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/sw_interval_rest"
+                    style="@style/AppSwitch"
+                    android:checked="true" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="horizontal">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        style="@style/TxtFieldLabel"
+                        android:text="每关注N个后休息" />
+
+                    <EditText
+                        android:id="@+id/et_rest_after_n"
+                        style="@style/InputBox"
+                        android:layout_marginTop="6dp"
+                        android:text="5" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        style="@style/TxtFieldLabel"
+                        android:text="休息秒数" />
+
+                    <EditText
+                        android:id="@+id/et_rest_seconds"
+                        style="@style/InputBox"
+                        android:layout_marginTop="6dp"
+                        android:text="30" />
+                </LinearLayout>
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ==================== 授权信息 ==================== -->
+        <LinearLayout
+            style="@style/CardBox"
+            android:layout_marginBottom="10dp">
+
+            <TextView
+                style="@style/TxtSection"
+                android:text="授权信息" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtValue"
+                    android:layout_width="78dp"
+                    android:text="授权状态"
+                    android:textColor="@color/text_secondary" />
+
+                <TextView
+                    style="@style/TxtValue"
+                    android:text="已授权"
+                    android:textColor="@color/success_green"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="11dp"
+                android:background="@color/divider" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="11dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtValue"
+                    android:layout_width="78dp"
+                    android:text="到期时间"
+                    android:textColor="@color/text_secondary" />
+
+                <TextView
+                    style="@style/TxtValue"
+                    android:text="2027-04-24 17:33:42" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="11dp"
+                android:background="@color/divider" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="11dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtValue"
+                    android:layout_width="78dp"
+                    android:text="激活卡密"
+                    android:textColor="@color/text_secondary" />
+
+                <TextView
+                    style="@style/TxtValue"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:text="••••••••"
+                    android:textColor="@color/text_tertiary" />
+
+                <ImageView
+                    android:layout_width="18dp"
+                    android:layout_height="18dp"
+                    android:contentDescription="卡密"
+                    android:src="@drawable/ic_lock" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:paddingTop="4dp"
+            android:paddingBottom="10dp"
+            android:text="v9.2"
+            android:textColor="@color/text_tertiary"
+            android:textSize="11sp" />
+
+    </LinearLayout>
+</ScrollView>

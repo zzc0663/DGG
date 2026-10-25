@@ -1,0 +1,297 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/page_bg"
+    android:fillViewport="true"
+    android:scrollbars="none">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="12dp"
+        android:paddingTop="12dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="8dp">
+
+        <include layout="@layout/part_permission_card" />
+
+        <!-- ==================== 运行设置 ==================== -->
+        <LinearLayout
+            style="@style/CardBox"
+            android:layout_marginBottom="10dp">
+
+            <TextView
+                style="@style/TxtSection"
+                android:text="运行设置" />
+
+            <TextView
+                style="@style/TxtFieldLabel"
+                android:layout_marginTop="14dp"
+                android:text="运行时长（分钟，1-1440）" />
+
+            <EditText
+                android:id="@+id/et_run_minutes"
+                style="@style/InputBox"
+                android:layout_marginTop="6dp"
+                android:text="60" />
+        </LinearLayout>
+
+        <!-- ==================== 养号模式 ==================== -->
+        <LinearLayout
+            style="@style/CardBox"
+            android:layout_marginBottom="10dp">
+
+            <TextView
+                style="@style/TxtSection"
+                android:text="养号模式" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/seg_mode_idle"
+                    style="@style/SegItemSelected"
+                    android:background="@drawable/bg_segment_selected"
+                    android:text="挂机涨粉" />
+
+                <TextView
+                    android:id="@+id/seg_mode_vertical"
+                    style="@style/SegItem"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_chip_normal"
+                    android:text="垂直养号" />
+
+                <TextView
+                    android:id="@+id/seg_mode_home"
+                    style="@style/SegItem"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_chip_normal"
+                    android:text="首页连播" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tv_mode_desc"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_hint"
+                android:paddingStart="10dp"
+                android:paddingTop="9dp"
+                android:paddingEnd="10dp"
+                android:paddingBottom="9dp"
+                android:text="挂机涨粉：搜索关键词用户，浏览粉丝列表互动涨粉"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <!-- ==================== 操作概率 ==================== -->
+        <LinearLayout
+            style="@style/CardBox"
+            android:layout_marginBottom="10dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtSection"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:text="操作概率" />
+
+                <TextView
+                    android:id="@+id/tv_comment_config"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:text="评论配置 ›"
+                    android:textColor="@color/brand_red"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- 点赞概率 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtRowTitle"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:text="点赞概率" />
+
+                <TextView
+                    android:id="@+id/tv_pct_like"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="40%"
+                    android:textColor="@color/brand_red"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <com.google.android.material.slider.Slider
+                android:id="@+id/slider_like"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:stepSize="5"
+                android:value="40"
+                android:valueFrom="0"
+                android:valueTo="40"
+                app:haloColor="#26E1251B"
+                app:labelBehavior="gone"
+                app:thumbColor="@color/brand_red"
+                app:tickVisible="false"
+                app:trackColorActive="@color/brand_red"
+                app:trackColorInactive="@color/switch_track_off" />
+
+            <!-- 收藏概率 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtRowTitle"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:text="收藏概率" />
+
+                <TextView
+                    android:id="@+id/tv_pct_collect"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="15%"
+                    android:textColor="@color/brand_red"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <com.google.android.material.slider.Slider
+                android:id="@+id/slider_collect"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:stepSize="5"
+                android:value="15"
+                android:valueFrom="0"
+                android:valueTo="40"
+                app:haloColor="#26E1251B"
+                app:labelBehavior="gone"
+                app:thumbColor="@color/brand_red"
+                app:tickVisible="false"
+                app:trackColorActive="@color/brand_red"
+                app:trackColorInactive="@color/switch_track_off" />
+
+            <!-- 评论概率 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtRowTitle"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:text="评论概率" />
+
+                <TextView
+                    android:id="@+id/tv_pct_comment"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="10%"
+                    android:textColor="@color/brand_red"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <com.google.android.material.slider.Slider
+                android:id="@+id/slider_comment"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:stepSize="5"
+                android:value="10"
+                android:valueFrom="0"
+                android:valueTo="40"
+                app:haloColor="#26E1251B"
+                app:labelBehavior="gone"
+                app:thumbColor="@color/brand_red"
+                app:tickVisible="false"
+                app:trackColorActive="@color/brand_red"
+                app:trackColorInactive="@color/switch_track_off" />
+
+            <!-- 转发概率 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtRowTitle"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:text="转发概率" />
+
+                <TextView
+                    android:id="@+id/tv_pct_share"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="5%"
+                    android:textColor="@color/brand_red"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <com.google.android.material.slider.Slider
+                android:id="@+id/slider_share"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:stepSize="5"
+                android:value="5"
+                android:valueFrom="0"
+                android:valueTo="40"
+                app:haloColor="#26E1251B"
+                app:labelBehavior="gone"
+                app:thumbColor="@color/brand_red"
+                app:tickVisible="false"
+                app:trackColorActive="@color/brand_red"
+                app:trackColorInactive="@color/switch_track_off" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="⚠ 为避免触发风控，每项概率最多设置 40%"
+                android:textColor="@color/warning_amber"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:paddingTop="4dp"
+            android:paddingBottom="10dp"
+            android:text="v9.2"
+            android:textColor="@color/text_tertiary"
+            android:textSize="11sp" />
+
+    </LinearLayout>
+</ScrollView>
