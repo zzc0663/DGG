@@ -31,6 +31,7 @@ import com.example.dgg.engine.SmokeFlow
 import com.example.dgg.engine.TaskEngine
 import com.example.dgg.engine.flow.FollowFromLiveFlow
 import com.example.dgg.engine.risk.Humanizer
+import com.example.dgg.service.DebugChannel
 import com.example.dgg.service.DggAccessibilityService
 import com.example.dgg.service.EngineController
 import com.example.dgg.util.AppPermissions
@@ -101,6 +102,9 @@ class MainActivity : AppCompatActivity() {
 
         store = SettingsStore.get(this)
         LogStore.i(TAG, "主界面创建，参数已加载（目标=${store.current.followTarget}，日上限=${store.current.dailyLimit}）")
+
+        // 调试通道的另一入口：服务连接回调在 HyperOS 上不保证触发，界面创建是可靠的兜底
+        DebugChannel.startIfNeeded(this)
 
         setupTabs()
         setupPermissionCards()

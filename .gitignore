@@ -17,5 +17,8 @@ local.properties
 .DS_Store
 Thumbs.db
 
+# ===== 真机联调快照（截图 + 节点树 dump，体积大且随时过期）=====
+shots/real/
+
 # ===== Agent 会话数据 =====
 .workbuddy/

@@ -173,6 +173,41 @@ class Actions(
         return ok
     }
 
+    /**
+     * 点击一条**评论行**的昵称区。
+     *
+     * 实测（抖音 40.8.0）：一条评论是「一整行一个 text 节点」，内容形如
+     * `‎昵称：正文[表情][表情]`，昵称并不是独立节点。
+     * 此时 `tapNode` 的「bounds 内避开中心随机取点」会落在**正文区**，
+     * 而正文区点击不打开资料卡（多半无响应或触发别的手势）。
+     *
+     * 所以这里只在行首一小段里取点：水平方向限制在左侧 2%~28% 且不超过 150px，
+     * 垂直方向取行中线。这个范围能覆盖常见 2~6 字昵称，同时不会跑到正文上。
+     */
+    suspend fun tapNickname(node: AccessibilityNodeInfo, label: String): Boolean {
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        if (bounds.width() <= 0 || bounds.height() <= 0) {
+            LogStore.w(TAG, "评论行没有有效 bounds，无法点击：$label")
+            return false
+        }
+
+        val minX = bounds.left + Math.max(6, (bounds.width() * 0.02f).toInt())
+        val maxX = minOf(
+            bounds.left + (bounds.width() * 0.28f).toInt(),
+            bounds.left + 150
+        ).coerceAtLeast(minX + 4)
+        val x = minX + humanizer.randomInt(maxX - minX + 1)
+        val y = bounds.centerY()
+
+        LogStore.d(TAG, "点击昵称区 $label @ ($x,$y) 行=[${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}]")
+        if (dispatchTap(Point(x, y))) return true
+
+        val ok = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        LogStore.w(TAG, "昵称区手势不可用，退化为 ACTION_CLICK：$label → $ok")
+        return ok
+    }
+
     private suspend fun dispatchTap(point: Point): Boolean {
         val path = Path().apply { moveTo(point.x.toFloat(), point.y.toFloat()) }
         val stroke = GestureDescription.StrokeDescription(path, 0, humanizer.tapDurationMs())

@@ -57,6 +57,10 @@ class Humanizer(private val jitterPercent: Int) {
     fun chance(percent: Int): Boolean =
         random.nextInt(100) < percent.coerceIn(0, 100)
 
+    /** [0, boundExclusive) 的随机整数，供落点微调使用 */
+    fun randomInt(boundExclusive: Int): Int =
+        random.nextInt(boundExclusive.coerceAtLeast(1))
+
     private companion object {
         const val MIN_DELAY_MS = 50L
 

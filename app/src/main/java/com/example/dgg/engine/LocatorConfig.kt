@@ -3,6 +3,7 @@ package com.example.dgg.engine
 import android.content.Context
 import com.example.dgg.data.LogStore
 import org.json.JSONObject
+import java.io.File
 
 /** 一个可定位的目标。IMAGE 类型在 M1 恒不命中（图像通道 M2 接入）。 */
 data class Target(
@@ -165,24 +166,47 @@ object LocatorConfigLoader {
         if (!forceReload) cached?.let { return it }
 
         var degraded = false
-        val config = runCatching {
-            val text = context.assets.open(ASSET_NAME).bufferedReader().use { it.readText() }
-            LocatorConfig.parse(JSONObject(text))
-        }.onFailure {
-            degraded = true
-            LogStore.e(TAG, "加载 $ASSET_NAME 失败，降级为内置配置：${it.message}")
-        }.getOrElse { LocatorConfig.fallback() }
+        var source = "assets"
 
-        cached = config
+        // 外部文件优先：真机校准定位规则时不必重新打包，覆盖一份 JSON 即可。
+        // 路径 <app>/files/douyin_locator.json —— 刻意用**内部**存储：
+        // /sdcard/Android/data/ 在 Android 11+ 连 run-as 都进不去，adb 没法投递文件。
+        // 解析失败会自动回退 assets，不会因为一份写坏的配置让任务彻底跑不起来。
+        val external = runCatching { File(context.filesDir, ASSET_NAME) }.getOrNull()
+
+        var config: LocatorConfig? = null
+        if (external != null && external.isFile) {
+            config = runCatching {
+                LocatorConfig.parse(JSONObject(external.readText()))
+            }.onFailure {
+                LogStore.w(TAG, "外部配置解析失败，回退 assets：${it.message}")
+            }.getOrNull()
+            if (config != null) source = "外部文件"
+        }
+
+        if (config == null) {
+            config = runCatching {
+                val text = context.assets.open(ASSET_NAME).bufferedReader().use { it.readText() }
+                LocatorConfig.parse(JSONObject(text))
+            }.onFailure {
+                degraded = true
+                LogStore.e(TAG, "加载 $ASSET_NAME 失败，降级为内置配置：${it.message}")
+            }.getOrElse { LocatorConfig.fallback() }
+        }
+
+        // 用 val 承接，避免可空 var 在后续使用处丢失智能转换
+        val resolved = config
+
+        cached = resolved
         LogStore.i(
             TAG,
             buildString {
-                append("已加载 v${config.version}")
-                append("：${config.pages.size} 个页面规则（${config.pages.keys.joinToString("/")}）")
-                append("，${config.targets.size} 个命名目标")
+                append("已加载 v${resolved.version}（来源：$source）")
+                append("：${resolved.pages.size} 个页面规则（${resolved.pages.keys.joinToString("/")}）")
+                append("，${resolved.targets.size} 个命名目标")
                 if (degraded) append(" [降级]")
             }
         )
-        return config
+        return resolved
     }
 }

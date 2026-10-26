@@ -1,16 +1,17 @@
 {
-  "_note": "抖音页面定位规则。数值均为待真机校准的初版假设，未在真实抖音上验证。改版或失效时只改本文件，不必重新打包。字段说明见 docs/定位配置说明.md",
-  "_unverified": true,
-  "version": 2,
+  "_note": "抖音页面定位规则。已按抖音 40.8.0 / Android 16 真机实测校准（2026-10-26）。改版或失效时只改本文件，不必重新打包：覆盖 <app>/files/douyin_locator.json 后重启应用即可。字段说明见 docs/定位配置说明.md",
+  "_verified": "40.8.0",
+  "_notes_on_ids": "抖音 40.8.0 的 resource-id 全是混淆短码（j_x / gxu / 5ym / 0py），随版本变化且无规律。本文件刻意不依赖任何 id，只用 text / content-desc。",
+  "version": 3,
   "excludeNicknames": ["我", "作者", "主播", "管理员", "房管", "粉丝团"],
   "pages": {
     "HOME": {
-      "threshold": 5,
+      "threshold": 6,
       "features": [
-        { "w": 3, "type": "text", "value": "首页" },
-        { "w": 3, "type": "text", "value": "朋友" },
-        { "w": 2, "type": "descContains", "value": "消息" },
-        { "w": 1, "type": "text", "value": "我" }
+        { "w": 3, "type": "descContains", "value": "首页，按钮" },
+        { "w": 2, "type": "descContains", "value": "朋友，按钮" },
+        { "w": 2, "type": "descContains", "value": "已选中，推荐" },
+        { "w": 2, "type": "text", "value": "商城" }
       ]
     },
     "SEARCH": {
@@ -40,11 +41,13 @@
       ]
     },
     "LIVE_ROOM": {
-      "threshold": 4,
+      "threshold": 5,
       "features": [
         { "w": 3, "type": "textContains", "value": "说点什么" },
-        { "w": 2, "type": "textContains", "value": "在线" },
-        { "w": 2, "type": "textContains", "value": "送礼" }
+        { "w": 2, "type": "descContains", "value": "在线观众" },
+        { "w": 2, "type": "descContains", "value": "礼物数" },
+        { "w": 2, "type": "textContains", "value": "本场点赞" },
+        { "w": 1, "type": "descContains", "value": "关闭 按钮" }
       ]
     }
   },
@@ -56,9 +59,8 @@
 
     "follow_button": { "type": "text", "value": "关注" },
     "followed_button": { "type": "text", "value": "已关注" },
-    "close_card": { "type": "descContains", "value": "关闭" },
 
-    "live_comment_nickname": { "type": "id", "value": "com.ss.android.ugc.aweme:id/nickname" },
+    "_comment_comment_line": "实测 40.8.0 的评论是「一整行一个 text 节点」，内容为 `昵称：正文`，昵称不是独立节点，也没有稳定的 nickname id。因此不走 id 主路径，直接用冒号切分。若将来版本暴露了独立昵称节点，再补 live_comment_nickname。",
     "live_comment_line": { "type": "textContains", "value": "：" },
 
     "comment_input": { "type": "textContains", "value": "说点什么" },

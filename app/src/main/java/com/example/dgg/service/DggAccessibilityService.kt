@@ -5,6 +5,8 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
 import android.view.accessibility.AccessibilityEvent
 import com.example.dgg.data.LogStore
+import java.io.File
+import java.util.Locale
 
 /**
  * 无障碍服务 —— 整个自动化能力的根。
@@ -24,12 +26,19 @@ import com.example.dgg.data.LogStore
  */
 class DggAccessibilityService : AccessibilityService() {
 
+    override fun onCreate() {
+        super.onCreate()
+        // 双入口启动调试通道：HyperOS 覆盖安装/强杀后不一定回调 onServiceConnected
+        DebugChannel.startIfNeeded(this)
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         current = this
         eventCount = 0L
         lastEventAt = 0L
         LogStore.i(TAG, "无障碍服务已连接，能力=${describeCapabilities()}")
+        DebugChannel.startIfNeeded(this)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {

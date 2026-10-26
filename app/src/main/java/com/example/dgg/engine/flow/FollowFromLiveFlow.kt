@@ -31,8 +31,11 @@ class FollowFromLiveFlow : Flow {
         val store = FollowedStore.get(ctx.appContext)
         val targets = LiveTargets.from(ctx.config)
 
-        if (!ctx.actions.isDouyinForeground()) {
-            throw FlowAbortException("抖音不在前台。请先切到目标直播间，再回来点开始")
+        if (!awaitDouyinForeground(ctx, DOUYIN_FOREGROUND_TIMEOUT_MS)) {
+            throw FlowAbortException(
+                "等待 ${DOUYIN_FOREGROUND_TIMEOUT_MS / 1000} 秒仍未切到抖音前台。" +
+                    "请手动打开抖音并进入目标直播间后再开始"
+            )
         }
 
         val remaining = store.remainingToday(settings.dailyLimit)
@@ -93,13 +96,15 @@ class FollowFromLiveFlow : Flow {
             ctx.publish(message = "挑中「$nickname」")
             LogStore.i(TAG, "候选 ${candidates.size} 人，随机挑中「$nickname」")
 
-            // 弹幕滚动很快，采集时的坐标早失效了；按昵称重新定位，找不到就丢掉这个人
-            val node = ctx.actions.find(Target(Target.Kind.TEXT, nickname))
+            // 弹幕滚动很快，采集时的坐标早失效了；按昵称重新定位，找不到就丢掉这个人。
+            // 必须用 contains：实测评论节点是「昵称：正文」整行，用等值匹配永远命中不了。
+            val node = ctx.actions.find(Target(Target.Kind.TEXT_CONTAINS, nickname))
             if (node == null) {
                 LogStore.w(TAG, "「$nickname」已滚出屏幕，跳过")
                 continue
             }
-            if (!ctx.actions.tapNode(node, "昵称「$nickname」")) {
+            // 不能点整行：正文区点了不弹资料卡，必须落在行首昵称区
+            if (!ctx.actions.tapNickname(node, "昵称「$nickname」")) {
                 LogStore.w(TAG, "点击「$nickname」失败，跳过")
                 continue
             }
@@ -169,6 +174,27 @@ class FollowFromLiveFlow : Flow {
     // ==================== 候选采集 ====================
 
     /**
+     * 等抖音真正到前台。
+     *
+     * 「开始」按钮在抖关关界面上，所以点击那一刻抖音必然在后台；
+     * 启动流程时会把抖音拉到前台，但切进程 + resume 需要时间。
+     * 直接判一次 isDouyinForeground() 必然为 false，会把每次正常启动都误杀成「抖音不在前台」。
+     */
+    private suspend fun awaitDouyinForeground(ctx: FlowContext, timeoutMs: Long): Boolean {
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (ctx.stopped()) return false
+            if (ctx.actions.isDouyinForeground()) {
+                // 刚 resume 时窗口内容可能还是上一帧，稍等再读，避免抓到空树
+                delay(FRONT_SETTLE_MS)
+                return true
+            }
+            delay(FRONT_POLL_MS)
+        }
+        return false
+    }
+
+    /**
      * 三级采集：配置的主路径 → 整行文本冒号切分兜底 → 过滤。
      * 返回去重、过滤后的昵称列表；空列表代表「这一屏没有可用新人」。
      */
@@ -215,15 +241,41 @@ class FollowFromLiveFlow : Flow {
 
     /** 整行形如「昵称：评论内容」，取冒号前的部分；没有冒号就不是评论行 */
     private fun splitNickname(line: String): String? {
-        val index = line.indexOfFirst { it == '：' || it == ':' }
+        val cleaned = sanitize(line)
+        val index = cleaned.indexOfFirst { it == '：' || it == ':' }
         if (index <= 0) return null
-        return line.substring(0, index)
+        return sanitize(cleaned.substring(0, index))
+    }
+
+    /**
+     * 去掉不可见字符。
+     *
+     * 实测抖音的评论文本以 **U+200E（LEFT-TO-RIGHT MARK）** 开头（`‎紫丽丽：…`）。
+     * 不清理会有两个后果：
+     * 1. 昵称带着零宽字符落盘，同一人换条评论就可能被当成新面孔，去重失效；
+     * 2. 用昵称回查节点时，字符串两边不一致导致定位不到。
+     */
+    private fun sanitize(raw: String): String {
+        val sb = StringBuilder(raw.length)
+        for (c in raw) {
+            when {
+                c.code < 0x20 -> {}                       // 控制字符
+                c.code in 0x200B..0x200F -> {}             // 零宽空格 / LRM / RLM
+                c.code in 0x202A..0x202E -> {}             // 方向控制
+                c.code in 0x2060..0x2069 -> {}
+                c.code == 0xFEFF -> {}                     // BOM
+                else -> sb.append(c)
+            }
+        }
+        return sb.toString().trim()
     }
 
     private fun isValidNickname(name: String): Boolean {
         if (name.length !in MIN_NICK_LENGTH..MAX_NICK_LENGTH) return false
         if (name.all { it.isDigit() }) return false
         if (name.any { it == '：' || it == ':' || it == '\n' }) return false
+        // 表情文本化后是「[调皮][比心]」这类方括号，昵称里不该出现
+        if (name.startsWith("[") || name.endsWith("]")) return false
         // 系统提示会被误当成昵称（「xx 来了」「xx 关注了主播」），整条丢弃
         if (SYSTEM_MESSAGE_HINTS.any { name.contains(it) }) return false
         return true
@@ -283,11 +335,25 @@ class FollowFromLiveFlow : Flow {
 
     // ==================== 收尾 ====================
 
-    /** 关掉资料卡/半屏弹层：优先点配置的关闭按钮，退化用系统返回 */
+    /**
+     * 关掉资料卡/半屏弹层。
+     *
+     * **刻意不用配置里的「关闭」按钮**：实测直播间右上角有一颗 desc 为「关闭 按钮」的控件，
+     * 那是**退出直播间**的。如果拿 descContains "关闭" 去点它，弹层一消失就会把人踢出房间，
+     * 后面每一轮都在错误的页面上瞎跑。
+     *
+     * 现在改为：先确认弹层还在（还能找到关注/已关注按钮）→ 用系统返回关闭 → 再确认一次。
+     * 弹层已经不在了就什么都不做，避免多余的返回把直播间退掉。
+     */
     private suspend fun closeCard(ctx: FlowContext, targets: LiveTargets) {
-        val closed = targets.close?.let { ctx.actions.click(it) } ?: false
-        if (!closed && !ctx.actions.back()) {
-            LogStore.w(TAG, "关闭弹层失败（关闭按钮与返回键都没生效）")
+        val stillOpen = findCardButton(ctx, targets.follow) != null ||
+            findCardButton(ctx, targets.followed) != null
+        if (!stillOpen) {
+            LogStore.d(TAG, "弹层已不在，跳过关闭动作")
+            return
+        }
+        if (!ctx.actions.back()) {
+            LogStore.w(TAG, "返回键未生效，弹层可能仍在（下一轮会重新判断）")
         }
         ctx.settle(CLOSE_SETTLE_MS)
     }
@@ -297,8 +363,7 @@ class FollowFromLiveFlow : Flow {
         val nickname: Target?,
         val line: Target?,
         val follow: Target,
-        val followed: Target,
-        val close: Target?
+        val followed: Target
     ) {
         companion object {
             fun from(config: LocatorConfig): LiveTargets {
@@ -317,8 +382,7 @@ class FollowFromLiveFlow : Flow {
                     nickname = nickname,
                     line = line,
                     follow = follow,
-                    followed = followed,
-                    close = config.target("close_card")
+                    followed = followed
                 )
             }
         }
@@ -339,6 +403,11 @@ class FollowFromLiveFlow : Flow {
         const val CARD_TIMEOUT_MS = 6_000L
         const val VERIFY_TIMEOUT_MS = 3_000L
         const val CARD_POLL_MS = 250L
+
+        /** 等抖音切到前台的初始等待：冷启动抖音可能要几秒 */
+        const val DOUYIN_FOREGROUND_TIMEOUT_MS = 10_000L
+        const val FRONT_POLL_MS = 300L
+        const val FRONT_SETTLE_MS = 900L
 
         /** 屏幕顶部这个比例内出现的「关注」按钮属于直播间头部（主播的），不属于弹层 */
         const val TOP_EXCLUDE_RATIO = 0.30f
