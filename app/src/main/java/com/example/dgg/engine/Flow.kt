@@ -94,6 +94,40 @@ class FlowContext(
         guard()
     }
 
+    /**
+     * 长等待（分钟级）用这个：分片执行，每片之间检查停止/暂停，结束后查一次风控。
+     *
+     * 直接用 [settle] 等 60 分钟是不行的——一次 `delay` 期间收不到暂停，
+     * 用户点「暂停」要等满 60 分钟才生效。分片还有个好处：等待期间能顺便
+     * 把剩余时间发到通知栏/悬浮窗，不然界面上一小时都是同一句话。
+     *
+     * @param capMs 抖动后的上限。抖动是 ±30% 的话 60 分钟能漂到 78 分钟，
+     *              而界面上承诺的上限是 60 分钟，所以夹住。
+     */
+    suspend fun settleLong(baseMs: Long, capMs: Long = Long.MAX_VALUE, chunkMs: Long = 1_000L) {
+        var left = humanizer.delayMs(baseMs).coerceAtMost(capMs)
+        var sincePublish = 0L
+        while (left > 0) {
+            val slice = minOf(chunkMs, left)
+            delay(slice)
+            left -= slice
+            sincePublish += slice
+            if (stopped()) return
+            // 未暂停时立即返回；暂停期间挂起在这里，恢复后接着等
+            awaitResume()
+            if (stopped()) return
+            if (sincePublish >= PUBLISH_EVERY_MS && left > 0) {
+                sincePublish = 0
+                publish(message = "等待下次扫描，还有 ${left / 1000}s")
+            }
+        }
+        guard()
+    }
+
+    private companion object {
+        const val PUBLISH_EVERY_MS = 10_000L
+    }
+
     suspend fun awaitResume() = resumeWaiter()
 
     fun stopped(): Boolean = stopFlag()

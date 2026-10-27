@@ -43,7 +43,8 @@ class SettingsStore private constructor(context: Context) {
         return Settings(
             calMode = sp.getInt(KEY_CAL_MODE, d.calMode),
             followTarget = sp.getInt(KEY_FOLLOW_TARGET, d.followTarget),
-            scanIntervalMs = sp.getInt(KEY_SCAN_INTERVAL, d.scanIntervalMs),
+            scanIntervalValue = sp.getInt(KEY_SCAN_VALUE, migrateScanValue()),
+            scanIntervalUnit = sp.getInt(KEY_SCAN_UNIT, d.scanIntervalUnit),
             dailyLimit = sp.getInt(KEY_DAILY_LIMIT, d.dailyLimit),
             jitterPercent = sp.getInt(KEY_JITTER, d.jitterPercent),
             idleLive = sp.getBoolean(KEY_IDLE_LIVE, d.idleLive),
@@ -74,7 +75,8 @@ class SettingsStore private constructor(context: Context) {
         sp.edit()
             .putInt(KEY_CAL_MODE, s.calMode)
             .putInt(KEY_FOLLOW_TARGET, s.followTarget)
-            .putInt(KEY_SCAN_INTERVAL, s.scanIntervalMs)
+            .putInt(KEY_SCAN_VALUE, s.scanIntervalValue)
+            .putInt(KEY_SCAN_UNIT, s.scanIntervalUnit)
             .putInt(KEY_DAILY_LIMIT, s.dailyLimit)
             .putInt(KEY_JITTER, s.jitterPercent)
             .putBoolean(KEY_IDLE_LIVE, s.idleLive)
@@ -101,12 +103,28 @@ class SettingsStore private constructor(context: Context) {
             .apply()
     }
 
+    /**
+     * 旧版本把扫描间隔直接存毫秒（`scan_interval=1500`）。
+     * 新版本存「数值 + 单位」，所以首次读取时把旧毫秒换算成秒——只在旧键存在且新键从未写过时生效。
+     */
+    private fun migrateScanValue(): Int {
+        // 全新安装（没有旧键）：直接用新的默认值 30 秒，不要沿用旧的 1.5 秒
+        if (!sp.contains(KEY_SCAN_INTERVAL_LEGACY)) return Settings.DEFAULT_SCAN_VALUE
+        val legacyMs = sp.getInt(KEY_SCAN_INTERVAL_LEGACY, LEGACY_DEFAULT_SCAN_MS)
+        val seconds = (legacyMs + 500L) / 1000L   // 旧值是 Int 毫秒，四舍五入到秒
+        return seconds.coerceIn(Settings.MIN_SCAN_SECONDS, Settings.MAX_SCAN_SECONDS).toInt()
+    }
+
     companion object {
         private const val SP_NAME = "dgg_settings"
 
         private const val KEY_CAL_MODE = "cal_mode"
         private const val KEY_FOLLOW_TARGET = "follow_target"
-        private const val KEY_SCAN_INTERVAL = "scan_interval"
+        private const val KEY_SCAN_VALUE = "scan_interval_value"
+        private const val KEY_SCAN_UNIT = "scan_interval_unit"
+        /** 旧键：扫描间隔直接存毫秒，已废弃，仅用于一次性迁移 */
+        private const val KEY_SCAN_INTERVAL_LEGACY = "scan_interval"
+        private const val LEGACY_DEFAULT_SCAN_MS = Settings.DEFAULT_SCAN_VALUE * 1000
         private const val KEY_DAILY_LIMIT = "daily_limit"
         private const val KEY_JITTER = "jitter_percent"
         private const val KEY_IDLE_LIVE = "idle_live"

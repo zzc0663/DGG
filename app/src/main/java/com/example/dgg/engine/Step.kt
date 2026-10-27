@@ -88,7 +88,8 @@ class StepFlow(
             }
 
             if (index < steps.lastIndex) {
-                ctx.settle(ctx.settings.scanIntervalMs.toLong().coerceIn(300, 8_000))
+                // 间隔最长 60 分钟，分片等——一次性 delay 会让暂停/停止收不到
+                ctx.settleLong(ctx.settings.scanIntervalMs)
             }
         }
     }

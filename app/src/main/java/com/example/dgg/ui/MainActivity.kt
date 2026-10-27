@@ -5,6 +5,7 @@ import android.content.Intent
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
+import android.text.InputFilter
 import android.view.View
 import android.widget.EditText
 import android.widget.TextView
@@ -21,6 +22,7 @@ import com.example.dgg.data.SettingsStore
 import com.example.dgg.data.license.LicenseProvider
 import com.example.dgg.data.license.LocalLicenseProvider
 import com.example.dgg.databinding.ActivityMainBinding
+import com.example.dgg.databinding.ContentAutoFollowBinding
 import com.example.dgg.engine.Actions
 import com.example.dgg.engine.EngineProgress
 import com.example.dgg.engine.EngineState
@@ -244,10 +246,20 @@ class MainActivity : AppCompatActivity() {
             listOf(c.segManualCal, c.segAutoCal), s.calMode, grouped = true
         ) { index -> store.edit { it.copy(calMode = index) } }
 
-        bindIntField(c.etFollowTarget, s.followTarget) { v -> store.edit { it.copy(followTarget = v) } }
-        bindIntField(c.etScanInterval, s.scanIntervalMs) { v -> store.edit { it.copy(scanIntervalMs = v) } }
-        bindIntField(c.etDailyLimit, s.dailyLimit) { v -> store.edit { it.copy(dailyLimit = v) } }
+        val followMin = Settings.FOLLOW_COUNT_MIN
+        val followMax = Settings.FOLLOW_COUNT_MAX
+        bindRangedIntField(c.etFollowTarget, s.followTarget, followMin, followMax) { v ->
+            store.edit { it.copy(followTarget = v) }
+            LogStore.i(TAG, "目标关注数量 = $v")
+        }
+        bindRangedIntField(c.etDailyLimit, s.dailyLimit, followMin, followMax) { v ->
+            store.edit { it.copy(dailyLimit = v) }
+            LogStore.i(TAG, "每日关注上限 = $v")
+        }
         bindIntField(c.etJitter, s.jitterPercent) { v -> store.edit { it.copy(jitterPercent = v) } }
+
+        // 扫描间隔 = 数值 + 单位，单位切换时按总时长换算
+        bindScanInterval(c)
 
         bindSwitch(c.swIdleLive, s.idleLive) { v ->
             store.edit { it.copy(idleLive = v) }
@@ -315,6 +327,107 @@ class MainActivity : AppCompatActivity() {
         edit.doAfterTextChanged { text ->
             val v = text?.toString()?.toIntOrNull() ?: return@doAfterTextChanged
             onChange(v)
+        }
+    }
+
+    /**
+     * 带范围的数字输入框（关注数量 / 关注上限）。
+     *
+     * 三处细节：
+     * 1. **长度过滤**先挡一道（10000 最多 5 位），避免「99999」这种输入一路写进参数；
+     * 2. 输入中超出上限**立即夹取并回写**，不让非法值停留在设置里；
+     * 3. 失焦时兜底——用户可能把内容清空或留下「0」，此时填回合法值并提示。
+     *    没有这一条，清空输入框后参数会停在旧值，界面和设置不一致。
+     */
+    private fun bindRangedIntField(
+        edit: EditText,
+        value: Int,
+        min: Int,
+        max: Int,
+        onChange: (Int) -> Unit
+    ) {
+        edit.setText(value.coerceIn(min, max).toString())
+        edit.filters = arrayOf(InputFilter.LengthFilter(max.toString().length))
+
+        edit.doAfterTextChanged { text ->
+            val raw = text?.toString()?.toIntOrNull() ?: return@doAfterTextChanged
+            val v = raw.coerceIn(min, max)
+            if (v != raw) {
+                edit.setText(v.toString())
+                edit.setSelection(edit.text?.length ?: 0)
+                return@doAfterTextChanged   // setText 会再触发本回调，夹取后的值在那里写入
+            }
+            onChange(v)
+        }
+        edit.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus) return@setOnFocusChangeListener
+            val raw = edit.text?.toString()?.toIntOrNull()
+            val v = (raw ?: min).coerceIn(min, max)
+            if (raw != v) {
+                edit.setText(v.toString())
+                toast("已调整为 $min ~ $max 范围内的 $v")
+            }
+            onChange(v)
+        }
+    }
+
+    /**
+     * 扫描间隔 = 数值 + 单位。
+     *
+     * 数值上限跟着单位走（秒 ≤3600，分钟 ≤60），所以这里不用通用的
+     * [bindRangedIntField]——它的 max 是一次性常量。
+     * 切单位时按**总时长**换算（30 秒 → 分钟 = 0 被夹成 1 分钟），
+     * 不做「换单位就重置成默认值」那种丢用户配置的事。
+     */
+    private fun bindScanInterval(c: ContentAutoFollowBinding) {
+        val s = store.current
+        c.etScanInterval.setText(s.scanIntervalValue.toString())
+
+        val commit: (Int) -> Unit = { v ->
+            store.edit { it.copy(scanIntervalValue = v) }
+            LogStore.i(TAG, "扫描间隔 = ${store.current.scanIntervalLabel}")
+        }
+        fun maxOf(unit: Int) = Settings.scanValueMax(unit)
+
+        c.etScanInterval.doAfterTextChanged { text ->
+            val raw = text?.toString()?.toIntOrNull() ?: return@doAfterTextChanged
+            val v = raw.coerceIn(Settings.MIN_SCAN_SECONDS.toInt(), maxOf(store.current.scanIntervalUnit))
+            if (v != raw) {
+                c.etScanInterval.setText(v.toString())
+                c.etScanInterval.setSelection(c.etScanInterval.text?.length ?: 0)
+                return@doAfterTextChanged
+            }
+            commit(v)
+        }
+        c.etScanInterval.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus) return@setOnFocusChangeListener
+            val max = maxOf(store.current.scanIntervalUnit)
+            val raw = c.etScanInterval.text?.toString()?.toIntOrNull()
+            val v = (raw ?: Settings.DEFAULT_SCAN_VALUE).coerceIn(Settings.MIN_SCAN_SECONDS.toInt(), max)
+            if (raw != v) {
+                c.etScanInterval.setText(v.toString())
+                toast("已调整为 1 ~ $max 范围内的 $v")
+            }
+            commit(v)
+        }
+
+        bindSegmented(
+            listOf(c.segIntervalSec, c.segIntervalMin), s.scanIntervalUnit, grouped = false
+        ) { unit ->
+            if (unit == store.current.scanIntervalUnit) return@bindSegmented
+            val totalSeconds = store.current.scanTotalSeconds()
+            val newVal = if (unit == Settings.UNIT_MINUTE) {
+                (totalSeconds / 60).toInt().coerceIn(1, maxOf(Settings.UNIT_MINUTE))
+            } else {
+                totalSeconds.coerceIn(Settings.MIN_SCAN_SECONDS, Settings.MAX_SCAN_SECONDS).toInt()
+            }
+            store.edit { it.copy(scanIntervalUnit = unit, scanIntervalValue = newVal) }
+            c.etScanInterval.setText(newVal.toString())
+            LogStore.i(
+                TAG,
+                "扫描间隔单位切换为${if (unit == Settings.UNIT_MINUTE) "分钟" else "秒"}，" +
+                    "数值 $newVal（${store.current.scanIntervalLabel}）"
+            )
         }
     }
 
@@ -514,7 +627,8 @@ class MainActivity : AppCompatActivity() {
             .setTitle("开始关注")
             .setMessage(
                 "开始前请确认：你已经在抖音里手动进入目标直播间，并停在直播间画面。\n\n" +
-                    "脚本会循环执行：读直播间评论 → 随机挑一个人 → 点开资料卡 → 关注 → 回直播间。" +
+                    "脚本会循环执行：读直播间评论 → 随机挑一个人 → 点开资料卡 → 关注 → 回直播间，" +
+                    "每次关注之间间隔约 ${s.scanIntervalLabel}（叠加 ±${s.jitterPercent}% 抖动）。\n\n" +
                     "达到「目标关注数量 ${s.followTarget}」或「今日上限 ${s.dailyLimit}」时停止。\n\n" +
                     "不会私信、不会点赞、不会刷评论，也不会自己去找直播间。\n\n" +
                     "运行期间屏幕会被自动操作，请勿手动干扰；随时可用悬浮窗或通知栏停止。"

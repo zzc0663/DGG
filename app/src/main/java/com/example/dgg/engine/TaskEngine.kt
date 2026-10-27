@@ -94,8 +94,8 @@ object TaskEngine {
         )
         LogStore.i(
             TAG,
-            "启动流程「${flow.name}」：目标 ${settings.followTarget}，抖动 ±${settings.jitterPercent}%，" +
-                "扫描间隔 ${settings.scanIntervalMs}ms"
+            "启动流程「${flow.name}」：目标 ${settings.followTarget}，每日上限 ${settings.dailyLimit}，" +
+                "抖动 ±${settings.jitterPercent}%，扫描间隔 ${settings.scanIntervalLabel}"
         )
 
         job = scope.launch {

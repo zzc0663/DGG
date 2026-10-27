@@ -5,6 +5,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.example.dgg.data.FollowedStore
 import com.example.dgg.data.LogStore
 import com.example.dgg.data.RoomStore
+import com.example.dgg.data.Settings
 import com.example.dgg.util.CurrentRoomAnchor
 import com.example.dgg.data.SettingsStore
 import com.example.dgg.engine.Flow
@@ -98,22 +99,31 @@ class FollowFromLiveFlow : Flow {
          * 误触发一次「目标数已调整」，日志刷屏还把真正的人工修改淹没掉。
          */
         var lastSeenTargetSetting = settings.followTarget
+        var lastSeenDailyLimit = settings.dailyLimit
 
         while (followed < target) {
             if (ctx.stopped()) return
             ctx.awaitResume()
             ctx.guard()
 
-            // 实时目标：面板上改了立刻生效（调小会在达到后自然结束，调大继续跑）
+            // 实时目标与上限：界面/面板上改了立刻生效（调小会在达到后自然结束，调大继续跑）
             val fresh = SettingsStore.get(ctx.appContext).current
-            if (fresh.followTarget != lastSeenTargetSetting) {
+            if (fresh.followTarget != lastSeenTargetSetting || fresh.dailyLimit != lastSeenDailyLimit) {
                 lastSeenTargetSetting = fresh.followTarget
-                val newTarget = minOf(
-                    fresh.followTarget.coerceAtLeast(1),
-                    store.remainingToday(fresh.dailyLimit)
-                )
+                lastSeenDailyLimit = fresh.dailyLimit
+                val remainingNow = store.remainingToday(fresh.dailyLimit)
+                if (remainingNow <= 0) {
+                    // 上限被调到今日已关注数以下：立刻停，不要带着 0 目标空转
+                    LogStore.i(
+                        TAG,
+                        "每日上限已调为 ${fresh.dailyLimit}，今日已关注 ${store.todayCount()}，停止"
+                    )
+                    ctx.publish(message = "已达每日上限 ${fresh.dailyLimit}")
+                    break
+                }
+                val newTarget = minOf(fresh.followTarget.coerceAtLeast(1), remainingNow)
                 if (newTarget != target) {
-                    LogStore.i(TAG, "目标数已从 $target 调整为 $newTarget（悬浮面板实时修改）")
+                    LogStore.i(TAG, "目标数已从 $target 调整为 $newTarget（界面实时修改）")
                     target = newTarget
                     ctx.publish(target = target, message = "目标数已改为 $newTarget")
                     if (followed >= target) break
@@ -309,7 +319,8 @@ class FollowFromLiveFlow : Flow {
                         LogStore.i(TAG, "到达休息点（每 ${settings.restAfterN} 个），休息 ${settings.restSeconds}s")
                         ctx.settle(settings.restSeconds * 1_000L)
                     } else {
-                        ctx.settle(settings.scanIntervalMs.toLong().coerceIn(MIN_GAP_MS, MAX_GAP_MS))
+                        // 间隔可能长达 60 分钟：分片等待，暂停/停止才收得到
+                        ctx.settleLong(settings.scanIntervalMs, capMs = Settings.MAX_SCAN_MS)
                     }
                 }
             }
@@ -732,8 +743,6 @@ class FollowFromLiveFlow : Flow {
          * 用 4 轮（约 30 秒）就中止会让用户误以为「脚本老是自己停」。
          */
         const val MAX_IDLE_ROUNDS = 12
-        const val MIN_GAP_MS = 600L
-        const val MAX_GAP_MS = 15_000L
 
         /**
          * 只在最新的这么多个**可用**候选里随机挑人。
