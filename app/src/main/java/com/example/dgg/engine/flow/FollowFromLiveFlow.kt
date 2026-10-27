@@ -10,6 +10,7 @@ import com.example.dgg.engine.FlowContext
 import com.example.dgg.engine.LocatorConfig
 import com.example.dgg.engine.PageState
 import com.example.dgg.engine.Target
+import com.example.dgg.util.Texts
 import kotlinx.coroutines.delay
 
 /**
@@ -54,6 +55,7 @@ class FollowFromLiveFlow : Flow {
 
         var followed = 0
         var dryRounds = 0
+        var reusedHits = 0
         val handled = HashSet<String>()
 
         while (followed < target) {
@@ -96,18 +98,20 @@ class FollowFromLiveFlow : Flow {
             }
 
             // 随机挑，不按评论顺序从上往下点——顺序点是最容易被识别的机器特征
-            val nickname = candidates.random()
+            val pick = candidates.random()
+            val nickname = pick.name
             handled += nickname
             ctx.publish(message = "挑中「$nickname」")
             LogStore.i(TAG, "候选 ${candidates.size} 人，随机挑中「$nickname」")
 
-            // 弹幕滚动很快，采集时的坐标早失效了；按昵称重新定位，找不到就丢掉这个人。
+            // 优先复用采集时那个节点（省掉一次整树回查），失效了才按昵称回查。
             // 必须用 contains：实测评论节点是「昵称：正文」整行，用等值匹配永远命中不了。
-            val node = ctx.actions.find(Target(Target.Kind.TEXT_CONTAINS, nickname))
+            val node = resolveCandidate(ctx, pick)
             if (node == null) {
                 LogStore.w(TAG, "「$nickname」已滚出屏幕，跳过")
                 continue
             }
+            reusedHits += if (node === pick.node) 1 else 0
             // 不能点整行：正文区点了不弹资料卡，必须落在行首昵称区
             if (!ctx.actions.tapNickname(node, "昵称「$nickname」")) {
                 LogStore.w(TAG, "点击「$nickname」失败，跳过")
@@ -173,24 +177,63 @@ class FollowFromLiveFlow : Flow {
         }
 
         ctx.publish(message = "已达本轮目标 $target")
-        LogStore.i(TAG, "本轮完成：关注 $followed 人，达目标 $target")
+        LogStore.i(TAG, "本轮完成：关注 $followed 人，达目标 $target（直接复用采集节点 $reusedHits 次）")
     }
 
     // ==================== 候选采集 ====================
 
+    /** 一个候选人：昵称 + 采集时那个节点（为 null 表示只能靠回查） */
+    private class Candidate(val name: String, val node: AccessibilityNodeInfo?)
+
+    /**
+     * 把「挑中的候选人」变成「现在能点的节点」。
+     *
+     * 1. 先验采集时那个节点还能不能用（refresh + 仍在屏上 + 标签没被 RecyclerView 复用换人）；
+     * 2. 用不了才按昵称回查整棵树——这条路安全但慢，评论刷新快时经常白跑。
+     *
+     * 两者都失败就返回 null，调用方跳过这个人（不猜坐标、不重试）。
+     */
+    private fun resolveCandidate(ctx: FlowContext, cand: Candidate): AccessibilityNodeInfo? {
+        val held = cand.node
+        if (held != null) {
+            if (ctx.actions.stillValid(held, cand.name)) {
+                LogStore.d(TAG, "复用采集节点：「${cand.name}」（省掉一次全树回查）")
+                return held
+            }
+            LogStore.d(TAG, "采集节点已失效/已被复用，按昵称回查「${cand.name}」")
+        }
+        return ctx.actions.find(Target(Target.Kind.TEXT_CONTAINS, cand.name))
+    }
+
     /**
      * 确认当前确实在直播间；被浮层盖住就按一次返回尝试关掉最上面一层。
      *
-     * 只按一次，不做循环：真的退出直播间时（用户手动退出、或误触），
-     * 反复返回会把抖音一层层退到底，反而更难恢复。剩下的交给 dryRounds 中止。
+     * 两条保护（M3 实测补上）：
+     * 1. **一次 UNKNOWN 不算数**：收键盘/窗口切换的中间态会让某一刻读不到应用窗口，
+     *    单次误判就按返回会把好好的直播间退掉；
+     * 2. **前台不是抖音就绝不按返回**，否则退的是别的应用。
+     *
+     * 确认不在之后只按一次，不做循环：真的退出直播间时反复返回会把抖音一层层退到底，
+     * 反而更难恢复。剩下的交给 dryRounds 中止。
      *
      * @return 恢复后是否在直播间
      */
     private suspend fun ensureLiveRoom(ctx: FlowContext): Boolean {
-        if (ctx.detector.detect().page == PageState.LIVE_ROOM) return true
-        LogStore.w(TAG, "当前不在直播间（可能被浮层盖住），按一次返回尝试关掉浮层")
+        repeat(CONFIRM_CHECKS) { i ->
+            ctx.actions.invalidateSnapshot()
+            if (ctx.detector.detect().page == PageState.LIVE_ROOM) return true
+            if (i < CONFIRM_CHECKS - 1) delay(RECHECK_MS)
+        }
+
+        if (!ctx.actions.isDouyinForeground()) {
+            LogStore.w(TAG, "连续 $CONFIRM_CHECKS 次读不到直播间，且前台不是抖音——不按返回")
+            return false
+        }
+
+        LogStore.w(TAG, "连续 $CONFIRM_CHECKS 次不在直播间，按一次返回尝试关掉浮层")
         ctx.actions.back()
         ctx.settle(RECOVER_SETTLE_MS)
+        ctx.actions.invalidateSnapshot()
         return ctx.detector.detect().page == PageState.LIVE_ROOM
     }
 
@@ -217,35 +260,43 @@ class FollowFromLiveFlow : Flow {
 
     /**
      * 三级采集：配置的主路径 → 整行文本冒号切分兜底 → 过滤。
-     * 返回去重、过滤后的昵称列表；空列表代表「这一屏没有可用新人」。
+     * 返回去重、过滤后的候选人（**带节点**，供点击前复用）；空列表代表「这一屏没有可用新人」。
      */
     private fun collectCandidates(
         ctx: FlowContext,
         targets: LiveTargets,
         store: FollowedStore,
         handled: Set<String>
-    ): List<String> {
-        var raw: List<String> = emptyList()
+    ): List<Candidate> {
+        var raw: List<Pair<String, AccessibilityNodeInfo>> = emptyList()
         var source = "主路径"
         if (targets.nickname != null) {
             raw = ctx.actions.collect(targets.nickname, MAX_COLLECT)
-                .mapNotNull { ctx.actions.labelOf(it) }
+                .mapNotNull { node -> ctx.actions.labelOf(node)?.let { label -> label to node } }
         }
         if (raw.isEmpty() && targets.line != null) {
             source = "冒号切分兜底"
             raw = ctx.actions.collect(targets.line, MAX_COLLECT)
-                .mapNotNull { ctx.actions.labelOf(it) }
-                .mapNotNull { splitNickname(it) }
+                .mapNotNull { node ->
+                    val label = ctx.actions.labelOf(node) ?: return@mapNotNull null
+                    splitNickname(label)?.let { name -> name to node }
+                }
         }
 
-        val filtered = raw.asSequence()
-            .map { it.trim() }
-            .filter { isValidNickname(it) }
-            .filter { it !in ctx.config.excludeNicknames }
-            .filter { it !in handled }
-            .filter { !store.isFollowed(it) }
-            .distinct()
-            .toList()
+        val filtered = ArrayList<Candidate>(raw.size)
+        val seen = HashSet<String>(raw.size)
+        for ((rawName, node) in raw) {
+            val name = rawName.trim()
+            when {
+                !isValidNickname(name) -> {}
+                name in ctx.config.excludeNicknames -> {}
+                name in handled -> {}
+                store.isFollowed(name) -> {}
+                // 同一个人连发几条评论时，只留第一条对应的节点
+                !seen.add(name) -> {}
+                else -> filtered += Candidate(name, node)
+            }
+        }
 
         if (raw.isEmpty()) {
             LogStore.w(TAG, "本轮未采集到任何评论文本（来源：$source），可能是定位配置不匹配或评论区为空")
@@ -261,35 +312,7 @@ class FollowFromLiveFlow : Flow {
     }
 
     /** 整行形如「昵称：评论内容」，取冒号前的部分；没有冒号就不是评论行 */
-    private fun splitNickname(line: String): String? {
-        val cleaned = sanitize(line)
-        val index = cleaned.indexOfFirst { it == '：' || it == ':' }
-        if (index <= 0) return null
-        return sanitize(cleaned.substring(0, index))
-    }
-
-    /**
-     * 去掉不可见字符。
-     *
-     * 实测抖音的评论文本以 **U+200E（LEFT-TO-RIGHT MARK）** 开头（`‎紫丽丽：…`）。
-     * 不清理会有两个后果：
-     * 1. 昵称带着零宽字符落盘，同一人换条评论就可能被当成新面孔，去重失效；
-     * 2. 用昵称回查节点时，字符串两边不一致导致定位不到。
-     */
-    private fun sanitize(raw: String): String {
-        val sb = StringBuilder(raw.length)
-        for (c in raw) {
-            when {
-                c.code < 0x20 -> {}                       // 控制字符
-                c.code in 0x200B..0x200F -> {}             // 零宽空格 / LRM / RLM
-                c.code in 0x202A..0x202E -> {}             // 方向控制
-                c.code in 0x2060..0x2069 -> {}
-                c.code == 0xFEFF -> {}                     // BOM
-                else -> sb.append(c)
-            }
-        }
-        return sb.toString().trim()
-    }
+    private fun splitNickname(line: String): String? = Texts.beforeColon(line)
 
     private fun isValidNickname(name: String): Boolean {
         if (name.length !in MIN_NICK_LENGTH..MAX_NICK_LENGTH) return false
@@ -459,6 +482,10 @@ class FollowFromLiveFlow : Flow {
 
         /** 关掉意外弹出的浮层后，等界面稳定再重新判定 */
         const val RECOVER_SETTLE_MS = 900L
+
+        /** 判「不在直播间」要连续确认几次；一次不算数（收键盘等中间态会读到空窗口） */
+        const val CONFIRM_CHECKS = 2
+        const val RECHECK_MS = 500L
         const val CARD_TIMEOUT_MS = 6_000L
         const val VERIFY_TIMEOUT_MS = 3_000L
         const val CARD_POLL_MS = 250L

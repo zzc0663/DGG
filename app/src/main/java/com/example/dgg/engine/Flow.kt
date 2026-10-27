@@ -55,6 +55,7 @@ class FlowContext(
         message: String? = null,
         followed: Int? = null,
         target: Int? = null,
+        counterLabel: String? = null,
         stepIndex: Int? = null,
         stepTotal: Int? = null
     ) {
@@ -65,6 +66,7 @@ class FlowContext(
                 message = message ?: p.message,
                 followed = followed ?: p.followed,
                 target = target ?: p.target,
+                counterLabel = counterLabel ?: p.counterLabel,
                 stepIndex = stepIndex ?: p.stepIndex,
                 stepTotal = stepTotal ?: p.stepTotal,
                 updatedAt = System.currentTimeMillis()
@@ -72,9 +74,15 @@ class FlowContext(
         }
     }
 
-    /** 查风控；命中直接抛出，流程无从忽略。 */
+    /**
+     * 查风控；命中直接抛出，流程无从忽略。
+     *
+     * 走快照而不是自己再遍历一遍：连续动作之间界面没变，快照还能用（700ms 内），
+     * 省下的是实打实的时间——一趟全树遍历在这台真机的直播间里要 1.4 秒，
+     * 而每次 [settle] 都会查一次。
+     */
     suspend fun guard() {
-        AnomalyGuard.check(actions.root())?.let { throw AnomalyStopException(it) }
+        AnomalyGuard.check(actions.snapshot())?.let { throw AnomalyStopException(it) }
     }
 
     /**

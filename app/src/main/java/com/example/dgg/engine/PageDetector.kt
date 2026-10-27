@@ -9,7 +9,11 @@ import com.example.dgg.data.LogStore
  * 改名、改层级、被合并。多个特征加权后取最高分，只要超过阈值就成立，
  * 少掉一两个特征不会导致判定崩掉。
  *
- * 判定只在**页面发生变化时**打日志，否则 200ms 一次的轮询会把日志刷爆。
+ * **性能关键**：所有特征都在**同一份节点快照**上比对（[Actions.snapshot]）。
+ * 旧实现对每条特征各遍历一次全树，21 条特征 × 647 节点 = 每次判定 30 秒，
+ * 表现是「点了开始之后半分钟界面毫无动静」。现在是一趟遍历 + 21 次内存比对。
+ *
+ * 判定只在**页面发生变化时**打日志，否则轮询会把日志刷爆。
  */
 class PageDetector(
     private val config: LocatorConfig,
@@ -33,8 +37,8 @@ class PageDetector(
     private var lastLoggedPage: PageState? = null
 
     fun detect(): Detection {
-        val root = actions.root()
-        if (root == null) {
+        val facts = actions.snapshot()
+        if (facts.isEmpty()) {
             val d = Detection(
                 PageState.UNKNOWN, 0, 0, "",
                 listOf("无根节点：无障碍未授权，或当前窗口不提供内容")
@@ -50,7 +54,7 @@ class PageDetector(
             var score = 0
             val hits = mutableListOf<String>()
             for (feature in rule.features) {
-                if (actions.exists(feature.target, root)) {
+                if (facts.any { actions.matchesFacts(it, feature.target) }) {
                     score += feature.weight
                     hits += "${feature.target}(${feature.weight})"
                 }

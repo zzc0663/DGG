@@ -134,6 +134,22 @@ object DebugChannel {
                 LogStore.i(TAG, "TAP (${v[0]},${v[1]})：${service.dispatchGesture(g, null, null)}")
             }
 
+            cmd.startsWith("DTAP ") -> {
+                // 双击：校准「点赞」时用。两个 stroke 的时间必须错开，
+                // 否则系统会当成双指手势（见 Actions.doubleTap 的注释）。
+                val v = cmd.removePrefix("DTAP ").trim().split(Regex("\\s+")).mapNotNull { it.toFloatOrNull() }
+                if (service == null || v.size < 2) {
+                    LogStore.w(TAG, "DTAP 失败：service=${service != null} 参数=$cmd")
+                    return
+                }
+                val path = Path().apply { moveTo(v[0], v[1]) }
+                val g = GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0, 60))
+                    .addStroke(GestureDescription.StrokeDescription(path, 180, 60))
+                    .build()
+                LogStore.i(TAG, "DTAP (${v[0]},${v[1]})：${service.dispatchGesture(g, null, null)}")
+            }
+
             cmd.startsWith("SWIPE ") -> {
                 val v = cmd.removePrefix("SWIPE ").trim().split(Regex("\\s+")).mapNotNull { it.toFloatOrNull() }
                 if (service == null || v.size < 4) {

@@ -52,7 +52,91 @@ class Actions(
             return null
         }
         val start = root ?: return null
-        return findBy(start) { node -> matches(node, target) && isVisibleOnScreen(node) }
+        return findBy(start) { node -> matches(node, target) && isOnScreen(node) }
+    }
+
+    // ==================== 节点快照（一次遍历，多处复用） ====================
+
+    /**
+     * 某个节点的**只读特征快照**。
+     *
+     * 为什么要这个：每次读 `node.text` / `node.contentDescription` / `getChild(i)`
+     * 都是一次跨进程调用。实测在这台真机的直播间里（647 个节点），**一趟全树遍历约 1.4 秒**。
+     * 而页面判定有 21 条特征（5 页 × 各 4~5 条）、风控检查 1 趟、每一轮采集又要 1 趟……
+     * 如果每条特征都自己遍历一遍（旧实现就是），一次 `detect()` 要 30 秒，
+     * 表现就是「点了开始之后半分钟没有任何动作」。
+     *
+     * 现在改成：**遍历一次抓成快照，所有特征在内存里比对**。
+     */
+    class NodeFacts(
+        val text: String?,
+        val desc: String?,
+        val id: String?,
+        val editable: Boolean
+    )
+
+    private var snapshotCache: Snapshot? = null
+
+    private class Snapshot(val at: Long, val facts: List<NodeFacts>)
+
+    /**
+     * 抓一份快照。[ttlMs] 内重复调用直接复用上一份。
+     *
+     * 缓存的安全性靠两点保证：
+     * 1. **任何手势之后立刻失效**（见 [invalidateSnapshot]，所有 dispatchBack/dispatchTap/swipe 都会调）；
+     * 2. TTL 很短（默认 700ms），小于一个轮询周期——界面上真的冒出风控弹窗，最多晚 0.7 秒被发现。
+     */
+    fun snapshot(ttlMs: Long = SNAPSHOT_TTL_MS, root: AccessibilityNodeInfo? = null): List<NodeFacts> {
+        val cached = snapshotCache
+        if (cached != null && SystemClock.uptimeMillis() - cached.at <= ttlMs) return cached.facts
+
+        val start = root ?: root()
+        if (start == null) {
+            val empty = emptyList<NodeFacts>()
+            snapshotCache = Snapshot(SystemClock.uptimeMillis(), empty)
+            return empty
+        }
+
+        val facts = ArrayList<NodeFacts>(256)
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.addLast(start)
+        var visited = 0
+        while (queue.isNotEmpty() && visited < MAX_NODES) {
+            val node = queue.removeFirst()
+            visited++
+            // 屏外节点不参与判定：RecyclerView 滚出屏幕的行仍留在树里，且 bounds 已失效
+            if (isOnScreen(node)) {
+                facts += NodeFacts(
+                    text = textOf(node),
+                    desc = descOf(node),
+                    id = node.viewIdResourceName,
+                    editable = node.isEditable
+                )
+            }
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.addLast(it) }
+            }
+        }
+        snapshotCache = Snapshot(SystemClock.uptimeMillis(), facts)
+        return facts
+    }
+
+    /** 界面被操作过，快照作废 */
+    fun invalidateSnapshot() {
+        snapshotCache = null
+    }
+
+    /** 在快照上比对一条特征，语义与 [matches] 完全一致 */
+    fun matchesFacts(facts: NodeFacts, target: Target): Boolean {
+        return when (target.kind) {
+            Target.Kind.TEXT -> facts.text == target.value
+            Target.Kind.TEXT_CONTAINS -> facts.text?.contains(target.value) == true
+            Target.Kind.DESC -> facts.desc == target.value
+            Target.Kind.DESC_CONTAINS -> facts.desc?.contains(target.value) == true
+            Target.Kind.ID -> facts.id == target.value
+            Target.Kind.EDITABLE -> facts.editable
+            Target.Kind.IMAGE -> false
+        }
     }
 
     fun exists(target: Target, root: AccessibilityNodeInfo? = null): Boolean =
@@ -77,7 +161,7 @@ class Actions(
         while (queue.isNotEmpty() && visited < MAX_NODES && result.size < max) {
             val node = queue.removeFirst()
             visited++
-            if (matches(node, target) && isVisibleOnScreen(node)) {
+            if (matches(node, target) && isOnScreen(node)) {
                 result += node
                 if (result.size >= max) break
             }
@@ -91,6 +175,37 @@ class Actions(
     /** 节点的可读标签：优先 text，其次 contentDescription。用于从节点里取昵称。 */
     fun labelOf(node: AccessibilityNodeInfo): String? =
         textOf(node) ?: descOf(node)
+
+    /**
+     * 「复用采集阶段拿到的节点」的校验：刷新后再确认**还在屏上、内容没被别人顶替**。
+     *
+     * 两件事必须都做，少一件就等于没校验：
+     * - `refresh()` 只保证节点对象还挂在树上。评论列表是 RecyclerView，View 被回收复用后
+     *   节点对象依然有效（refresh 返回 true），但**显示的内容已经换成另一个人了**；
+     * - 所以还要比对标签，确认这条节点仍然承载着 [expectedLabel]。
+     *
+     * 直播弹幕滚动很快，采集到点击之间的几百毫秒足以让行位移甚至换人。此前一律「按昵称回查」，
+     * 安全但每次都要重走一遍整棵树（含大量屏外节点），一屏刷新快的时候几乎每轮都白跑。
+     * 有了这道校验，绝大多数轮次可以直接用采集时的节点，失效了才回退回查。
+     */
+    fun stillValid(node: AccessibilityNodeInfo, expectedLabel: String): Boolean {
+        if (!runCatching { node.refresh() }.getOrDefault(false)) return false
+        if (!isOnScreen(node)) return false
+        val label = labelOf(node) ?: return false
+        return label.contains(expectedLabel)
+    }
+
+    /**
+     * 找当前屏上第一个**可编辑**节点。
+     *
+     * 直播间的评论输入框，无障碍树里「说点什么」这句占位提示和真正的 EditText 可能不是同一个节点，
+     * 用 textContains("说点什么") 命中的往往是提示 TextView，对它 SET_TEXT 必然失败。
+     * 所以点完输入区后按 `isEditable` 重新找一次真正的输入框。
+     */
+    fun findEditable(root: AccessibilityNodeInfo? = null): AccessibilityNodeInfo? {
+        val start = root ?: root() ?: return null
+        return findBy(start) { node -> node.isEditable && isOnScreen(node) }
+    }
 
     /** 节点在屏幕上的矩形；无有效 bounds 时返回空 Rect（宽高为 0） */
     fun boundsOf(node: AccessibilityNodeInfo): Rect = Rect().also { node.getBoundsInScreen(it) }
@@ -107,8 +222,10 @@ class Actions(
      * 1. 采集到的昵称在回查时「已经滚出屏幕」——白跑一轮；
      * 2. 更糟：命中屏幕外的旧节点，拿它的旧坐标去点，落点正好压在**礼物按钮**上，
      *    把礼物面板打开了，于是后续所有采集都在礼物面板上做，全盘失效。
+     *
+     * 公开出去是给业务流程用的：它自己留住采集时的节点，点击前要再校验一次可见性。
      */
-    private fun isVisibleOnScreen(node: AccessibilityNodeInfo): Boolean {
+    fun isOnScreen(node: AccessibilityNodeInfo): Boolean {
         val r = boundsOf(node)
         if (r.width() <= 0 || r.height() <= 0) return false
         return r.bottom > 0 && r.top < screenHeight() && r.right > 0 && r.left < screenWidth()
@@ -121,6 +238,7 @@ class Actions(
             Target.Kind.DESC -> descOf(node) == target.value
             Target.Kind.DESC_CONTAINS -> descOf(node)?.contains(target.value) == true
             Target.Kind.ID -> node.viewIdResourceName == target.value
+            Target.Kind.EDITABLE -> node.isEditable
             Target.Kind.IMAGE -> false
         }
     }
@@ -170,8 +288,19 @@ class Actions(
     /**
      * 点击一个已拿到的节点。公开出来是给「先 collect 再挑一个」的场景用的：
      * 直播弹幕滚动快，采集到的坐标早已失效，调用方必须用它**当场的** bounds。
+     *
+     * **花钱守卫**：见 [isPaidAction]，命中就直接拒绝，不走任何退化路径。
      */
     suspend fun tapNode(node: AccessibilityNodeInfo, label: String): Boolean {
+        if (isPaidAction(node)) {
+            LogStore.e(
+                TAG,
+                "拒绝点击 $label：目标看起来是**付费**动作" +
+                    "（text=\"${textOf(node)}\" desc=\"${descOf(node)}\"）。" +
+                    "这一步可能产生真实消费，任何流程都不允许自动执行"
+            )
+            return false
+        }
         val bounds = Rect()
         node.getBoundsInScreen(bounds)
 
@@ -238,6 +367,72 @@ class Actions(
         return dispatch(GestureDescription.Builder().addStroke(stroke).build())
     }
 
+    /**
+     * 找一个**没有可点控件**的空白落点。
+     *
+     * 点赞要双击画面，但直播间画面上浮着礼物飘屏、送礼用户头像、互动挂件这些临时元素，
+     * 它们可点且会弹资料卡/充值页——实测就点开过别人的资料卡。
+     * 所以落点不能随便取：先随机试几个点，用 `isClickable` 校验底下是空的，全都压着控件就放弃
+     * （宁可这轮不点赞，也不盲点）。
+     */
+    fun freePointIn(area: Rect, attempts: Int = 6): Point? {
+        repeat(attempts) {
+            val point = humanizer.pointIn(area)
+            if (!hasClickableAt(point.x, point.y)) return point
+        }
+        return null
+    }
+
+    /** 屏幕坐标 (x,y) 处是否压着一个可点控件 */
+    fun hasClickableAt(x: Int, y: Int, root: AccessibilityNodeInfo? = null): Boolean {
+        val start = root ?: root() ?: return false
+        return findBy(start) { node ->
+            node.isClickable && isOnScreen(node) && boundsOf(node).contains(x, y)
+        } != null
+    }
+
+    /**
+     * 花钱守卫：目标是不是一个**会真实消费**的动作。
+     *
+     * 实测教训（40.8.0）：直播间底栏那颗叫「**小心心**」的控件是**1 钻的付费礼物**，
+     * 不是点赞按钮。点下去直接弹「送出小心心礼物需支付1钻，确定支付？」。
+     * 也就是说按文案「心形/小心心 = 点赞」去挑控件，会花掉用户的钱。
+     *
+     * 这条守卫放在最底层（而不是各业务自己判断），因为只要有一条流程漏判，
+     * 后果就是真实扣款——这类错误不允许靠「记得检查」来避免。
+     */
+    private fun isPaidAction(node: AccessibilityNodeInfo): Boolean {
+        val label = (textOf(node) ?: "") + " " + (descOf(node) ?: "")
+        return PAID_HINTS.any { label.contains(it) }
+    }
+
+    /**
+     * 双击同一个点。
+     *
+     * 抖音直播间里**双击画面就是点赞**（飘心），而右下角那颗心形按钮在无障碍树里
+     * 没有稳定的 text/desc（实测 40.8.0 整个节点树里搜不到「点赞」按钮），
+     * 所以点赞只能走双击。好处不止是能定位：双击本来就是真人的主要点赞方式，
+     * 比「精准点某个图标」更不像脚本。
+     *
+     * 两次点击之间必须留出间隔：`GestureDescription` 里同时进行的两个 stroke 会被系统
+     * 当成**双指**手势（缩放/双指点击），根本不是双击。所以 gap 一定要大于第一下的按压时长。
+     */
+    suspend fun doubleTap(point: Point): Boolean {
+        val firstDuration = humanizer.tapDurationMs()
+        val gap = humanizer.longIn(
+            maxOf(firstDuration + 20, DOUBLE_TAP_GAP_MIN_MS),
+            DOUBLE_TAP_GAP_MAX_MS
+        )
+        val path = Path().apply { moveTo(point.x.toFloat(), point.y.toFloat()) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, firstDuration))
+            .addStroke(GestureDescription.StrokeDescription(path, gap, humanizer.tapDurationMs()))
+            .build()
+        val ok = dispatch(gesture)
+        LogStore.d(TAG, "双击 @ ($point) 间隔 ${gap}ms → $ok")
+        return ok
+    }
+
     // ==================== 滑动 ====================
 
     /** 上滑：从下方 72% 划到上方 28%，用于列表翻页 */
@@ -292,14 +487,36 @@ class Actions(
      * 与真人逐键输入的特征完全不同。这里每个字符累积一次并留 80–200ms 间隔。
      */
     suspend fun typeText(target: Target, text: String): Boolean {
-        // 刻意声明为非空类型：循环里可能因界面刷新而重新定位，
-        // 用可空 var 会让编译器在第二次迭代就失去非空智能转换（跨迭代赋值）。
-        var node: AccessibilityNodeInfo = find(target) ?: run {
+        val node = find(target) ?: run {
             LogStore.w(TAG, "未找到输入框 $target")
             return false
         }
-        if (!node.isEditable) {
-            LogStore.w(TAG, "$target 不是可编辑节点，仍尝试 SET_TEXT")
+        return typeText(node, text, target.toString()) { find(target) }
+    }
+
+    /**
+     * 逐字输入到**已定位**的节点。
+     *
+     * [relocate] 用于节点中途失效时重新拿一次（直播间输入框会随评论面板刷新而重建）；
+     * 传 null 表示无法重定位，失效即失败。
+     *
+     * 为什么单独开这个重载：直播间的输入框，文案「说点什么」命中的可能是提示 TextView，
+     * 真正的 EditText 只能靠 `isEditable` 找（见 [findEditable]）。调用方自己定位好再传进来，
+     * 比在这里猜「哪个才是输入框」可靠。
+     */
+    suspend fun typeText(
+        node: AccessibilityNodeInfo,
+        text: String,
+        label: String,
+        relocate: (() -> AccessibilityNodeInfo?)? = null
+    ): Boolean {
+        // 刻意声明为非空类型：循环里可能因界面刷新而重新定位，
+        // 用可空 var 会让编译器在第二次迭代就失去非空智能转换（跨迭代赋值）。
+        var current: AccessibilityNodeInfo = node
+        // SET_TEXT 会改界面，逐字写完之后界面已不是快照里那副样子
+        invalidateSnapshot()
+        if (!current.isEditable) {
+            LogStore.w(TAG, "$label 不是可编辑节点，仍尝试 SET_TEXT")
         }
 
         val accumulated = StringBuilder()
@@ -311,13 +528,13 @@ class Actions(
                     accumulated.toString()
                 )
             }
-            var ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            var ok = current.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
             if (!ok) {
                 // 节点可能因界面刷新而失效，重新定位一次再试
-                val refreshed = find(target)
+                val refreshed = relocate?.invoke()
                 if (refreshed != null) {
-                    node = refreshed
-                    ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                    current = refreshed
+                    ok = current.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
                 }
             }
             if (!ok) {
@@ -326,13 +543,14 @@ class Actions(
             }
             delay(humanizer.charDelayMs())
         }
-        LogStore.d(TAG, "输入完成：\"$text\"（逐字 ${text.length} 次）")
+        LogStore.d(TAG, "输入完成：\"$text\"（逐字 ${text.length} 次，目标 $label）")
         return true
     }
 
     // ==================== 其他 ====================
 
     fun back(): Boolean {
+        invalidateSnapshot()
         val ok = service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
         LogStore.d(TAG, "返回键 → $ok")
         return ok
@@ -373,8 +591,10 @@ class Actions(
         return null
     }
 
-    private suspend fun dispatch(gesture: GestureDescription): Boolean =
-        suspendCancellableCoroutine { cont ->
+    private suspend fun dispatch(gesture: GestureDescription): Boolean {
+        // 手势一定会改变界面，快照立刻作废，避免上层拿着旧界面做判断
+        invalidateSnapshot()
+        return suspendCancellableCoroutine { cont ->
             val callback = object : AccessibilityService.GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
                     if (cont.isActive) cont.resume(true)
@@ -388,6 +608,7 @@ class Actions(
                 .getOrDefault(false)
             if (!dispatched && cont.isActive) cont.resume(false)
         }
+    }
 
     private fun textOf(node: AccessibilityNodeInfo): String? =
         node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
@@ -408,5 +629,21 @@ class Actions(
          * 文字本身总在行顶附近，所以贴上部取点。24px 约等于一行小字号文字的中心。
          */
         const val TEXT_HIT_INSET = 24
+
+        /** 双击两下之间的间隔（ms）。太短会被系统当成双指手势 */
+        const val DOUBLE_TAP_GAP_MIN_MS = 150L
+        const val DOUBLE_TAP_GAP_MAX_MS = 280L
+
+        /**
+         * 出现在控件的 text / content-desc 里就判定为「会花钱」。
+         * 「小心心」是实测踩到的：抖音直播间 1 钻付费礼物，长得像点赞按钮。
+         */
+        val PAID_HINTS = listOf("小心心", "支付", "充值", "购买", "打赏", "送礼")
+
+        /**
+         * 快照缓存有效期（ms）。
+         * 必须小于一个轮询周期（200ms~1s），否则风控弹窗会晚一步被发现。
+         */
+        const val SNAPSHOT_TTL_MS = 700L
     }
 }

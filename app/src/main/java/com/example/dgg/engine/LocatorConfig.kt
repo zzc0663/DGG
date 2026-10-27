@@ -5,7 +5,13 @@ import com.example.dgg.data.LogStore
 import org.json.JSONObject
 import java.io.File
 
-/** 一个可定位的目标。IMAGE 类型在 M1 恒不命中（图像通道 M2 接入）。 */
+/**
+ * 一个可定位的目标。IMAGE 类型在 M1 恒不命中（图像通道 M2 接入）。
+ *
+ * [Kind.EDITABLE] 是「按可编辑性定位」，[value] 无意义（恒为空）：
+ * 抖音的输入框文案不可靠——搜索框默认填的是「推荐搜索词」，直播间输入框外面盖着
+ * 「说点什么」的提示节点——按文本找必然踩空，只能按 `isEditable` 找。
+ */
 data class Target(
     val kind: Kind,
     val value: String,
@@ -17,7 +23,10 @@ data class Target(
         DESC("desc"),
         DESC_CONTAINS("descContains"),
         ID("id"),
-        IMAGE("image");
+        IMAGE("image"),
+
+        /** 找不到别的特征时的最后手段：屏上第一个可编辑节点 */
+        EDITABLE("editable");
 
         companion object {
             fun fromJson(name: String?): Kind? =
@@ -25,7 +34,8 @@ data class Target(
         }
     }
 
-    override fun toString(): String = "${kind.jsonName}:\"$value\""
+    override fun toString(): String =
+        if (kind == Kind.EDITABLE) "editable" else "${kind.jsonName}:\"$value\""
 }
 
 /** 页面判定的一条证据：命中则加 [weight] 分 */
@@ -136,6 +146,8 @@ data class LocatorConfig(
 
         private fun parseTarget(obj: JSONObject): Target? {
             val kind = Target.Kind.fromJson(obj.optString("type")) ?: return null
+            // editable 按可编辑性定位，不需要 value；其余类型缺 value 一律视为非法
+            if (kind == Target.Kind.EDITABLE) return Target(kind, "")
             val value = obj.optString("value")
             if (value.isBlank()) return null
             val threshold = obj.optDouble("threshold", 0.82).toFloat()

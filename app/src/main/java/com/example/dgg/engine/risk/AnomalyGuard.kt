@@ -2,6 +2,7 @@ package com.example.dgg.engine.risk
 
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.dgg.data.LogStore
+import com.example.dgg.engine.Actions
 
 /**
  * 风控异常识别 —— **命中即停机，禁止任何重试**（计划 §3.5）。
@@ -29,7 +30,16 @@ object AnomalyGuard {
         "验证码",
         "登录异常",
         "账号存在风险",
-        "账号异常"
+        "账号异常",
+        // 直播互动（M3）专项：评论频率被拦。这类提示往往是闪一下就消失的 toast，
+        // 所以 LiveInteractFlow 在「点完发送」之后会立刻多查一次，不等到下一次 settle。
+        "评论太快",
+        "评论过快",
+        "评论过于频繁",
+        "发送太频繁",
+        "发送过快",
+        "发言太频繁",
+        "稍后再评论"
     )
 
     private const val MAX_NODES = 500
@@ -64,6 +74,33 @@ object AnomalyGuard {
             if (depth >= MAX_DEPTH) continue
             for (i in 0 until node.childCount) {
                 node.getChild(i)?.let { stack.addLast(it to depth + 1) }
+            }
+        }
+        return null
+    }
+
+    /**
+     * 在**已有快照**上检查。
+     *
+     * 每次 settle 之后都要查风控，而 [check(root)] 自己就遍历一遍全树（实测 647 节点的
+     * 直播间约 1.4 秒）。一次等待要切片十几次，等于白花十几秒。
+     * 上层已经有快照（页面判定刚抓过、且中间没有任何手势）时走这条重载，零额外遍历。
+     */
+    fun check(facts: List<Actions.NodeFacts>): Hit? {
+        for (fact in facts) {
+            val text = fact.text
+            if (text != null) {
+                match(text)?.let { phrase ->
+                    LogStore.e(TAG, "检测到风控提示：${Hit(phrase, "text", text)}")
+                    return Hit(phrase, "text", text)
+                }
+            }
+            val desc = fact.desc
+            if (desc != null) {
+                match(desc)?.let { phrase ->
+                    LogStore.e(TAG, "检测到风控提示：${Hit(phrase, "desc", desc)}")
+                    return Hit(phrase, "desc", desc)
+                }
             }
         }
         return null

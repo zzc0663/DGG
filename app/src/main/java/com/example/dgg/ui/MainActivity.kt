@@ -30,6 +30,7 @@ import com.example.dgg.engine.PageDetector
 import com.example.dgg.engine.SmokeFlow
 import com.example.dgg.engine.TaskEngine
 import com.example.dgg.engine.flow.FollowFromLiveFlow
+import com.example.dgg.engine.flow.LiveInteractFlow
 import com.example.dgg.engine.risk.Humanizer
 import com.example.dgg.service.DebugChannel
 import com.example.dgg.service.DggAccessibilityService
@@ -53,9 +54,12 @@ import java.util.Locale
 /**
  * 主界面：三个页签 + 参数双向绑定 + 权限状态实时渲染 + 引擎状态跟随。
  *
- * 边界（M2）：「开始服务」启动的是**直播间评论关注**——需要用户自己先进好直播间，
- * 脚本只负责读评论、随机挑人、关注、回直播间。目标数/日上限/间隔/休息全部复用本页参数；
- * 不会私信、点赞、刷评论，也不会自己去找直播间。
+ * 「开始服务」只有一个按钮，按**当前页签**分发流程（M3 起）：
+ * - 自动关注 → [FollowFromLiveFlow]：读直播间评论 → 随机挑人 → 关注（M2）
+ * - 养号助手 → 尚未实现，明确拒绝启动（M4）
+ * - 直播互动 → [LiveInteractFlow]：随机间隔发评论 / 自动点赞 / 申请连麦（M3）
+ *
+ * 两条流程都要求用户自己先进好直播间：脚本不搜索、不找直播间、不切直播间。
  */
 class MainActivity : AppCompatActivity() {
 
@@ -68,6 +72,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tabs: List<TextView>
     private lateinit var indicators: List<View>
     private lateinit var pages: List<View>
+
+    /**
+     * 当前页签下标。
+     *
+     * 「开始服务」是三个页签共用的一个按钮，所以它必须知道自己在替哪个页签启动流程。
+     * 之前没记这个值，结果是无论在哪个页签点开始，跑的都是直播间关注——
+     * 用户在「直播互动」页填了评论参数、点开始，实际执行的是关注别人，属于最坏的一类错配。
+     */
+    private var currentTab = 0
 
     /** 收集引擎状态用的作用域；Activity 销毁时整体取消，避免把 binding 泄漏给常驻的单例 */
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -141,6 +154,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun selectTab(index: Int, log: Boolean = true) {
+        currentTab = index
         tabs.forEachIndexed { i, tab ->
             val selected = i == index
             tab.setTextColor(
@@ -411,7 +425,7 @@ class MainActivity : AppCompatActivity() {
                     LogStore.i(TAG, "点击「继续」")
                 }
 
-                else -> confirmAndStartFollow()
+                else -> confirmAndStart()
             }
         }
 
@@ -477,8 +491,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ==================== 启动分发 ====================
+
+    /**
+     * 按**当前页签**决定启动哪个流程。
+     *
+     * 「开始服务」只有一个按钮，三个页签共用。不按页签分发的话，用户在「直播互动」页
+     * 填完评论参数点开始，实际跑的是关注流程——参数全部无效，行为完全错配。
+     */
+    private fun confirmAndStart() {
+        when (currentTab) {
+            TAB_AUTO -> confirmFollow()
+            TAB_NURTURE -> showUnavailable(TAB_NAMES[TAB_NURTURE], "M4")
+            TAB_LIVE -> confirmLiveInteract()
+        }
+    }
+
     /** 「开始服务」= M2 主业务：直播间评论随机关注 */
-    private fun confirmAndStartFollow() {
+    private fun confirmFollow() {
         val s = store.current
         AlertDialog.Builder(this)
             .setTitle("开始关注")
@@ -491,6 +521,39 @@ class MainActivity : AppCompatActivity() {
             )
             .setPositiveButton("开始") { _, _ -> startFlow(FollowFromLiveFlow(), "已启动直播关注") }
             .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 「开始服务」= M3 主业务：直播间互动（发评论 / 点赞 / 连麦） */
+    private fun confirmLiveInteract() {
+        val s = store.current
+        val mode = if (s.commentMode == 1) "预设评论" else "复制最新评论"
+        AlertDialog.Builder(this)
+            .setTitle("开始直播互动")
+            .setMessage(
+                "开始前请确认：你已经在抖音里手动进入目标直播间，并停在直播间画面。\n\n" +
+                    "脚本会循环执行：每 ${s.commentGapMin}~${s.commentGapMax} 秒发一条评论（$mode），" +
+                    "每发 ${s.likeTrigger} 条自动点赞 ${s.likeCountMin}~${s.likeCountMax} 次" +
+                    (if (s.micRequest) "，并申请一次连麦" else "") + "。\n\n" +
+                    "没有总量目标，会一直跑到你手动停止。一旦出现「评论过快」一类的平台提示，立刻停机且不重试。\n\n" +
+                    "运行期间屏幕会被自动操作，请勿手动干扰；随时可用悬浮窗或通知栏停止。"
+            )
+            .setPositiveButton("开始") { _, _ -> startFlow(LiveInteractFlow(), "已启动直播互动") }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 尚未实现的功能页签：宁可明确说「没有」，也不要跑一个参数完全无关的流程 */
+    private fun showUnavailable(tabName: String, milestone: String) {
+        LogStore.w(TAG, "「$tabName」尚未实现（计划 $milestone），已拒绝启动")
+        AlertDialog.Builder(this)
+            .setTitle("暂未开放")
+            .setMessage(
+                "「$tabName」计划在 $milestone 实现，当前版本点「开始服务」不会启动任何流程。\n\n" +
+                    "现在可用的是：\n·「自动关注」——直播间评论随机关注\n" +
+                    "·「直播互动」——随机间隔发评论、自动点赞、申请连麦"
+            )
+            .setPositiveButton("知道了", null)
             .show()
     }
 
@@ -592,5 +655,9 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "主界面"
         private val TAB_NAMES = listOf("自动关注", "养号助手", "直播互动")
+
+        private const val TAB_AUTO = 0
+        private const val TAB_NURTURE = 1
+        private const val TAB_LIVE = 2
     }
 }

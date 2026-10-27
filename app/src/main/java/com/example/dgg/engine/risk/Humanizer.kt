@@ -61,6 +61,25 @@ class Humanizer(private val jitterPercent: Int) {
     fun randomInt(boundExclusive: Int): Int =
         random.nextInt(boundExclusive.coerceAtLeast(1))
 
+    /**
+     * [min, max] **闭区间**随机整数。
+     *
+     * 界面上用户填的是「5 ~ 15 秒」这种闭区间，直接 `nextInt(5, 15)` 会永远取不到 15，
+     * 用户填的单值区间（min == max）还会抛异常。这里把区间规整后再取。
+     */
+    fun intIn(min: Int, max: Int): Int {
+        val low = minOf(min, max)
+        val high = maxOf(min, max)
+        return if (low == high) low else random.nextInt(low, high + 1)
+    }
+
+    /** [min, max] 闭区间随机毫秒，语义同 [intIn] */
+    fun longIn(min: Long, max: Long): Long {
+        val low = minOf(min, max).coerceAtLeast(1L)
+        val high = maxOf(min, max).coerceAtLeast(low)
+        return if (low == high) low else random.nextLong(low, high + 1)
+    }
+
     private companion object {
         const val MIN_DELAY_MS = 50L
 

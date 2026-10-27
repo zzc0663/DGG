@@ -31,6 +31,13 @@ data class EngineProgress(
     val stepLabel: String = "",
     val followed: Int = 0,
     val target: Int = 0,
+    /**
+     * [followed] 这个数字叫什么。
+     *
+     * M2 关注流程是「已关注」，M3 直播互动是「已发评论」——同一个计数字段被两条业务线复用，
+     * 文案就必须由 Flow 自己声明，不能让通知栏/悬浮窗写死成「已关注」。
+     */
+    val counterLabel: String = "已关注",
     val consecutiveFailures: Int = 0,
     val message: String = "",
     val updatedAt: Long = 0L
@@ -39,7 +46,11 @@ data class EngineProgress(
     fun brief(): String = buildString {
         append(state.label)
         if (stepTotal > 0) append(" · 步骤 $stepIndex/$stepTotal")
-        if (target > 0) append(" · 已关注 $followed/$target")
+        when {
+            target > 0 -> append(" · $counterLabel $followed/$target")
+            // 没有总量目标的流程（如直播互动）只显示已完成数
+            followed > 0 -> append(" · $counterLabel $followed")
+        }
         if (message.isNotBlank()) append(" · $message")
     }
 }

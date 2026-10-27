@@ -1,69 +1,197 @@
 {
   "_note": "抖音页面定位规则。已按抖音 40.8.0 / Android 16 真机实测校准（2026-10-26）。改版或失效时只改本文件，不必重新打包：覆盖 <app>/files/douyin_locator.json 后重启应用即可。字段说明见 docs/定位配置说明.md",
-  "_verified": "40.8.0",
+  "_verified": "40.8.0 / OPPO PLB110（Android 17）2026-10-27 真机校准",
   "_notes_on_ids": "抖音 40.8.0 的 resource-id 全是混淆短码（j_x / gxu / 5ym / 0py），随版本变化且无规律。本文件刻意不依赖任何 id，只用 text / content-desc。",
   "_notes_on_comment_line": "实测 40.8.0 的评论是「一整行一个 text 节点」，内容为 `昵称：正文`，昵称不是独立节点，也没有稳定的 nickname id。因此不走 id 主路径，直接用冒号切分。若将来版本暴露了独立昵称节点，再补 live_comment_nickname。",
-  "version": 4,
-  "excludeNicknames": ["我", "作者", "主播", "管理员", "房管", "粉丝团"],
+  "version": 8,
+  "_unverified_targets": "live_comment_send 待校准（要点开评论面板才会出现「发送」）；live_mic_button 随直播间而异——实测这个直播间底栏只有 表情入口/小心心/礼物/更多面板，没有独立连线按钮，流程会记警告后跳过。",
+  "excludeNicknames": [
+    "我",
+    "作者",
+    "主播",
+    "管理员",
+    "房管",
+    "粉丝团"
+  ],
   "pages": {
     "HOME": {
       "threshold": 6,
       "features": [
-        { "w": 3, "type": "descContains", "value": "首页，按钮" },
-        { "w": 2, "type": "descContains", "value": "朋友，按钮" },
-        { "w": 2, "type": "descContains", "value": "已选中，推荐" },
-        { "w": 2, "type": "text", "value": "商城" }
+        {
+          "w": 3,
+          "type": "descContains",
+          "value": "首页，按钮"
+        },
+        {
+          "w": 2,
+          "type": "descContains",
+          "value": "朋友，按钮"
+        },
+        {
+          "w": 2,
+          "type": "descContains",
+          "value": "已选中，推荐"
+        },
+        {
+          "w": 2,
+          "type": "text",
+          "value": "商城"
+        }
       ]
     },
     "SEARCH": {
-      "threshold": 4,
+      "threshold": 5,
+      "_measured": "40.8.0 实测：本页**没有**「猜你想搜」也没有「取消」（旧版文案），实际是标题「猜你想看」+ 一排 `xx搜索，按钮` 推荐卡 + 底部「语音搜索」。顶部那颗「搜索」按钮在结果页也存在，所以单靠它只有 3 分，必须凑够 5 分才算搜索页。",
       "features": [
-        { "w": 3, "type": "textContains", "value": "搜索" },
-        { "w": 2, "type": "text", "value": "取消" },
-        { "w": 2, "type": "text", "value": "猜你想搜" }
+        {
+          "w": 3,
+          "type": "text",
+          "value": "搜索"
+        },
+        {
+          "w": 2,
+          "type": "text",
+          "value": "猜你想看"
+        },
+        {
+          "w": 2,
+          "type": "descContains",
+          "value": "搜索，按钮"
+        },
+        {
+          "w": 1,
+          "type": "text",
+          "value": "语音搜索"
+        }
       ]
     },
     "SEARCH_RESULT": {
       "threshold": 5,
       "features": [
-        { "w": 3, "type": "text", "value": "综合" },
-        { "w": 2, "type": "text", "value": "视频" },
-        { "w": 3, "type": "text", "value": "用户" },
-        { "w": 2, "type": "textContains", "value": "粉丝" }
+        {
+          "w": 3,
+          "type": "text",
+          "value": "综合"
+        },
+        {
+          "w": 2,
+          "type": "text",
+          "value": "视频"
+        },
+        {
+          "w": 3,
+          "type": "text",
+          "value": "用户"
+        },
+        {
+          "w": 2,
+          "type": "textContains",
+          "value": "粉丝"
+        }
       ]
     },
     "USER_PROFILE": {
       "threshold": 5,
       "features": [
-        { "w": 2, "type": "textContains", "value": "粉丝" },
-        { "w": 2, "type": "textContains", "value": "获赞" },
-        { "w": 3, "type": "text", "value": "关注" },
-        { "w": 1, "type": "text", "value": "作品" }
+        {
+          "w": 2,
+          "type": "textContains",
+          "value": "粉丝"
+        },
+        {
+          "w": 2,
+          "type": "textContains",
+          "value": "获赞"
+        },
+        {
+          "w": 3,
+          "type": "text",
+          "value": "关注"
+        },
+        {
+          "w": 1,
+          "type": "text",
+          "value": "作品"
+        }
       ]
     },
     "LIVE_ROOM": {
       "threshold": 5,
       "features": [
-        { "w": 3, "type": "textContains", "value": "说点什么" },
-        { "w": 2, "type": "descContains", "value": "在线观众" },
-        { "w": 2, "type": "descContains", "value": "礼物数" },
-        { "w": 2, "type": "textContains", "value": "本场点赞" },
-        { "w": 1, "type": "descContains", "value": "关闭 按钮" }
+        {
+          "w": 3,
+          "type": "textContains",
+          "value": "说点什么"
+        },
+        {
+          "w": 2,
+          "type": "descContains",
+          "value": "在线观众"
+        },
+        {
+          "w": 2,
+          "type": "descContains",
+          "value": "礼物数"
+        },
+        {
+          "w": 2,
+          "type": "textContains",
+          "value": "本场点赞"
+        },
+        {
+          "w": 1,
+          "type": "descContains",
+          "value": "关闭 按钮"
+        }
       ]
     }
   },
   "targets": {
-    "search_entry": { "type": "descContains", "value": "搜索" },
-    "search_input": { "type": "textContains", "value": "搜索" },
-    "search_confirm": { "type": "text", "value": "搜索" },
-    "user_tab": { "type": "text", "value": "用户" },
-
-    "follow_button": { "type": "text", "value": "关注" },
-    "followed_button": { "type": "text", "value": "取消关注" },
-
-    "live_comment_line": { "type": "textContains", "value": "：" },
-
-    "comment_input": { "type": "textContains", "value": "说点什么" },
-    "back": { "type": "descContains", "value": "返回" }
-  }
+    "search_entry": {
+      "type": "descContains",
+      "value": "搜索"
+    },
+    "search_input": {
+      "type": "editable"
+    },
+    "search_confirm": {
+      "type": "text",
+      "value": "搜索"
+    },
+    "user_tab": {
+      "type": "text",
+      "value": "用户"
+    },
+    "follow_button": {
+      "type": "text",
+      "value": "关注"
+    },
+    "followed_button": {
+      "type": "text",
+      "value": "取消关注"
+    },
+    "live_comment_line": {
+      "type": "textContains",
+      "value": "："
+    },
+    "comment_input": {
+      "type": "textContains",
+      "value": "说点什么"
+    },
+    "live_comment_send": {
+      "type": "text",
+      "value": "发送"
+    },
+    "live_mic_button": {
+      "type": "descContains",
+      "value": "连线"
+    },
+    "back": {
+      "type": "descContains",
+      "value": "返回"
+    }
+  },
+  "_calibrated_pages": "HOME 9/6、SEARCH 8/5、SEARCH_RESULT 8/5、USER_PROFILE 8/5、LIVE_ROOM 8/5 —— 全部在真机上用「识别当前页面」实测通过（得分/阈值）。",
+  "_notes_on_search_input": "搜索框里默认填的是「推荐搜索词」（实测是某个视频标题），既不是「搜索」也不是空串，按文本永远命不中——只能按 editable 找。",
+  "_traps": "⚠️ 直播间底栏的「小心心」（desc='小心心'）是 **1 钻付费礼物**，不是点赞按钮；点它会出现支付确认。任何定位都不要指向它——Actions.tapNode 有花钱守卫会直接拒点。40.8.0 直播间里没有「点赞」按钮，点赞只能双击空白画面（Actions.doubleTap）。"
 }
