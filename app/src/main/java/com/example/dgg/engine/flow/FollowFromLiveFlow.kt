@@ -61,6 +61,11 @@ class FollowFromLiveFlow : Flow {
             ctx.awaitResume()
             ctx.guard()
 
+            // 点评论有几率误开礼物面板/操作栏之类的浮层（尤其点到滚动中的失效坐标），
+            // 一旦盖上，后面所有采集都是在浮层上做的，表现为「整页 UNKNOWN 然后空转」。
+            // 每轮先确认还在直播间，不在就按一次返回把它关掉。
+            ensureLiveRoom(ctx)
+
             val candidates = collectCandidates(ctx, targets, store, handled)
             if (candidates.isEmpty()) {
                 dryRounds++
@@ -172,6 +177,22 @@ class FollowFromLiveFlow : Flow {
     }
 
     // ==================== 候选采集 ====================
+
+    /**
+     * 确认当前确实在直播间；被浮层盖住就按一次返回尝试关掉最上面一层。
+     *
+     * 只按一次，不做循环：真的退出直播间时（用户手动退出、或误触），
+     * 反复返回会把抖音一层层退到底，反而更难恢复。剩下的交给 dryRounds 中止。
+     *
+     * @return 恢复后是否在直播间
+     */
+    private suspend fun ensureLiveRoom(ctx: FlowContext): Boolean {
+        if (ctx.detector.detect().page == PageState.LIVE_ROOM) return true
+        LogStore.w(TAG, "当前不在直播间（可能被浮层盖住），按一次返回尝试关掉浮层")
+        ctx.actions.back()
+        ctx.settle(RECOVER_SETTLE_MS)
+        return ctx.detector.detect().page == PageState.LIVE_ROOM
+    }
 
     /**
      * 等抖音真正到前台。
@@ -289,10 +310,25 @@ class FollowFromLiveFlow : Flow {
 
     private suspend fun awaitCard(ctx: FlowContext, targets: LiveTargets, timeoutMs: Long): CardProbe {
         val deadline = SystemClock.uptimeMillis() + timeoutMs
+        // 点评论行有两种结果：直接弹资料卡，或弹出快捷操作栏（资料卡/喜欢/不喜欢/@TA/更多）。
+        // 后者是临时浮层，几秒后自己消失，不点「资料卡」就永远等不到关注按钮。
+        // 这里只兜一次，避免在两个浮层之间来回点。
+        var triedProfileEntry = false
         while (SystemClock.uptimeMillis() < deadline) {
             if (ctx.stopped()) return CardProbe(CardState.UNKNOWN)
-            findCardButton(ctx, targets.followed)?.let { return CardProbe(CardState.ALREADY_FOLLOWED, it) }
+            findFollowedButton(ctx, targets)?.let { return CardProbe(CardState.ALREADY_FOLLOWED, it) }
             findCardButton(ctx, targets.follow)?.let { return CardProbe(CardState.FOLLOWABLE, it) }
+
+            if (!triedProfileEntry) {
+                val entry = ctx.actions.find(Target(Target.Kind.TEXT_CONTAINS, PROFILE_ENTRY_TEXT))
+                if (entry != null) {
+                    triedProfileEntry = true
+                    LogStore.i(TAG, "点评论后出现的是快捷操作栏，改点「$PROFILE_ENTRY_TEXT」进资料卡")
+                    ctx.actions.tapNode(entry, PROFILE_ENTRY_TEXT)
+                    delay(CARD_POLL_MS * 2)
+                    continue
+                }
+            }
             delay(CARD_POLL_MS)
         }
         return CardProbe(CardState.UNKNOWN)
@@ -302,7 +338,7 @@ class FollowFromLiveFlow : Flow {
         val deadline = SystemClock.uptimeMillis() + timeoutMs
         while (SystemClock.uptimeMillis() < deadline) {
             if (ctx.stopped()) return false
-            if (findCardButton(ctx, targets.followed) != null) return true
+            if (findFollowedButton(ctx, targets) != null) return true
             delay(CARD_POLL_MS)
         }
         return false
@@ -333,6 +369,26 @@ class FollowFromLiveFlow : Flow {
             }
     }
 
+    /**
+     * 找「已经是关注状态」的证据。
+     *
+     * 配置里的 `followed_button` 是主判据（40.8 实测为「取消关注」），
+     * 但抖音还有第三种态：对方也关注了你，按钮显示「互相关注」——
+     * 既不是「关注」也不是「取消关注」。
+     *
+     * 这一层兜底不是锦上添花，是**防止取关**：资料卡里那个 `text="关注"` 的残留节点
+     * 在已关注后仍然存在于节点树上，如果这里漏判，就会走到 FOLLOWABLE 分支去点
+     * 「关注按钮」，而那个坐标正好落在「取消关注」上——把已经关注的人取关。
+     * 所以宁可多重判一次已关注，也不能漏。
+     */
+    private fun findFollowedButton(ctx: FlowContext, targets: LiveTargets): AccessibilityNodeInfo? {
+        findCardButton(ctx, targets.followed)?.let { return it }
+        for (text in ALREADY_FOLLOWED_TEXTS) {
+            findCardButton(ctx, Target(Target.Kind.TEXT, text))?.let { return it }
+        }
+        return null
+    }
+
     // ==================== 收尾 ====================
 
     /**
@@ -347,7 +403,7 @@ class FollowFromLiveFlow : Flow {
      */
     private suspend fun closeCard(ctx: FlowContext, targets: LiveTargets) {
         val stillOpen = findCardButton(ctx, targets.follow) != null ||
-            findCardButton(ctx, targets.followed) != null
+            findFollowedButton(ctx, targets) != null
         if (!stillOpen) {
             LogStore.d(TAG, "弹层已不在，跳过关闭动作")
             return
@@ -400,12 +456,21 @@ class FollowFromLiveFlow : Flow {
         const val TAP_SETTLE_MS = 600L
         const val COMMENT_WAIT_MS = 2_500L
         const val CLOSE_SETTLE_MS = 500L
+
+        /** 关掉意外弹出的浮层后，等界面稳定再重新判定 */
+        const val RECOVER_SETTLE_MS = 900L
         const val CARD_TIMEOUT_MS = 6_000L
         const val VERIFY_TIMEOUT_MS = 3_000L
         const val CARD_POLL_MS = 250L
 
-        /** 等抖音切到前台的初始等待：冷启动抖音可能要几秒 */
-        const val DOUYIN_FOREGROUND_TIMEOUT_MS = 10_000L
+        /**
+         * 等抖音切到前台的初始等待。
+         *
+         * 冷启动实测要 10s 以上（Splash → 首页 → 恢复上次的 LivePlayActivity），
+         * 给 10s 会在正常启动时误杀成「未切到抖音前台」。这里放宽到 20s，
+         * 反正等到了就立刻继续，不会白白多等。
+         */
+        const val DOUYIN_FOREGROUND_TIMEOUT_MS = 20_000L
         const val FRONT_POLL_MS = 300L
         const val FRONT_SETTLE_MS = 900L
 
@@ -418,5 +483,18 @@ class FollowFromLiveFlow : Flow {
         val SYSTEM_MESSAGE_HINTS = listOf(
             "来了", "关注了主播", "送出", "点亮", "升级", "加入粉丝团", "为主播", "分享了直播间"
         )
+
+        /**
+         * 已关注态的按钮文案（抖音 40.8 实测）：
+         * 「取消关注」= 你关注了他；「互相关注」= 双方互关。
+         * 配置里的 followed_button 恒为「取消关注」，这里再兜一层互关。
+         */
+        val ALREADY_FOLLOWED_TEXTS = listOf("取消关注", "互相关注")
+
+        /**
+         * 点评论行有时弹出的是快捷操作栏而不是资料卡，栏里这一项才是资料卡入口。
+         * 这是实测（40.8.0）的文案，改版若变化会表现为「点开后等不到关注按钮」。
+         */
+        const val PROFILE_ENTRY_TEXT = "资料卡"
     }
 }

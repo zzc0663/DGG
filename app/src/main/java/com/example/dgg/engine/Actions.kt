@@ -12,6 +12,7 @@ import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.dgg.data.LogStore
 import com.example.dgg.engine.risk.Humanizer
+import com.example.dgg.util.ActiveWindow
 import com.example.dgg.util.DouyinLauncher
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -36,7 +37,7 @@ class Actions(
 
     // ==================== 定位 ====================
 
-    fun root(): AccessibilityNodeInfo? = runCatching { service.rootInActiveWindow }.getOrNull()
+    fun root(): AccessibilityNodeInfo? = ActiveWindow.root(service)
 
     fun foregroundPackage(): String? = root()?.packageName?.toString()
 
@@ -51,7 +52,7 @@ class Actions(
             return null
         }
         val start = root ?: return null
-        return findBy(start) { node -> matches(node, target) }
+        return findBy(start) { node -> matches(node, target) && isVisibleOnScreen(node) }
     }
 
     fun exists(target: Target, root: AccessibilityNodeInfo? = null): Boolean =
@@ -76,7 +77,7 @@ class Actions(
         while (queue.isNotEmpty() && visited < MAX_NODES && result.size < max) {
             val node = queue.removeFirst()
             visited++
-            if (matches(node, target)) {
+            if (matches(node, target) && isVisibleOnScreen(node)) {
                 result += node
                 if (result.size >= max) break
             }
@@ -97,6 +98,21 @@ class Actions(
     fun screenHeight(): Int = service.resources.displayMetrics.heightPixels
 
     fun screenWidth(): Int = service.resources.displayMetrics.widthPixels
+
+    /**
+     * 节点是否真的在屏幕内可见。
+     *
+     * 必须过滤：抖音的评论是 RecyclerView，滚出屏幕的行**仍然留在无障碍节点树里**，
+     * bounds 却是失效的（甚至越界成负坐标）。不过滤会有两种后果，实测都踩过：
+     * 1. 采集到的昵称在回查时「已经滚出屏幕」——白跑一轮；
+     * 2. 更糟：命中屏幕外的旧节点，拿它的旧坐标去点，落点正好压在**礼物按钮**上，
+     *    把礼物面板打开了，于是后续所有采集都在礼物面板上做，全盘失效。
+     */
+    private fun isVisibleOnScreen(node: AccessibilityNodeInfo): Boolean {
+        val r = boundsOf(node)
+        if (r.width() <= 0 || r.height() <= 0) return false
+        return r.bottom > 0 && r.top < screenHeight() && r.right > 0 && r.left < screenWidth()
+    }
 
     private fun matches(node: AccessibilityNodeInfo, target: Target): Boolean {
         return when (target.kind) {
@@ -182,7 +198,7 @@ class Actions(
      * 而正文区点击不打开资料卡（多半无响应或触发别的手势）。
      *
      * 所以这里只在行首一小段里取点：水平方向限制在左侧 2%~28% 且不超过 150px，
-     * 垂直方向取行中线。这个范围能覆盖常见 2~6 字昵称，同时不会跑到正文上。
+     * 垂直方向**贴住行的上部**（见下面的注释，取中心会落到行内空白处）。
      */
     suspend fun tapNickname(node: AccessibilityNodeInfo, label: String): Boolean {
         val bounds = Rect()
@@ -198,9 +214,17 @@ class Actions(
             bounds.left + 150
         ).coerceAtLeast(minX + 4)
         val x = minX + humanizer.randomInt(maxX - minX + 1)
-        val y = bounds.centerY()
+        // 不能取 centerY：评论行的 bounds 会随内容差异很大（纯文本行高 32px，
+        // 带等级标签/多行正文时能到 117px）。在高的行上 centerY 会落到文字**下方的空白**，
+        // 抖音把「点空白」解释成打开快捷操作栏（资料卡/喜欢/不喜欢/@TA/更多），
+        // 于是等不到资料卡里的关注按钮，整轮被判「没等到弹层」。
+        // 固定贴住行的上部（文字一定在那儿），用小偏移而不是比例。
+        val y = bounds.top + minOf(bounds.height() / 2, TEXT_HIT_INSET)
 
-        LogStore.d(TAG, "点击昵称区 $label @ ($x,$y) 行=[${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}]")
+        LogStore.d(
+            TAG,
+            "点击昵称区 $label @ ($x,$y) 行=[${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}] 高=${bounds.height()}"
+        )
         if (dispatchTap(Point(x, y))) return true
 
         val ok = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
@@ -377,5 +401,12 @@ class Actions(
 
         /** 滑动横向漂移相对纵向距离的比例 */
         const val DRIFT_RATIO = 0.03f
+
+        /**
+         * 点评论行时，纵向从行顶往下偏移的上限（px）。
+         * 评论行高 32~117px 不等，取 centerY 会落进文字下方空白触发快捷操作栏；
+         * 文字本身总在行顶附近，所以贴上部取点。24px 约等于一行小字号文字的中心。
+         */
+        const val TEXT_HIT_INSET = 24
     }
 }

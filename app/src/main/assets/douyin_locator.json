@@ -3,7 +3,7 @@
   "_verified": "40.8.0",
   "_notes_on_ids": "抖音 40.8.0 的 resource-id 全是混淆短码（j_x / gxu / 5ym / 0py），随版本变化且无规律。本文件刻意不依赖任何 id，只用 text / content-desc。",
   "_notes_on_comment_line": "实测 40.8.0 的评论是「一整行一个 text 节点」，内容为 `昵称：正文`，昵称不是独立节点，也没有稳定的 nickname id。因此不走 id 主路径，直接用冒号切分。若将来版本暴露了独立昵称节点，再补 live_comment_nickname。",
-  "version": 3,
+  "version": 4,
   "excludeNicknames": ["我", "作者", "主播", "管理员", "房管", "粉丝团"],
   "pages": {
     "HOME": {
@@ -59,7 +59,7 @@
     "user_tab": { "type": "text", "value": "用户" },
 
     "follow_button": { "type": "text", "value": "关注" },
-    "followed_button": { "type": "text", "value": "已关注" },
+    "followed_button": { "type": "text", "value": "取消关注" },
 
     "live_comment_line": { "type": "textContains", "value": "：" },
 
