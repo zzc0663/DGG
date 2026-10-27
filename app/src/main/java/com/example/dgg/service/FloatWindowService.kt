@@ -12,13 +12,19 @@ import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.widget.TextView
+import androidx.core.content.ContextCompat
 import com.example.dgg.R
 import com.example.dgg.data.FollowedStore
 import com.example.dgg.data.LogStore
+import com.example.dgg.data.RoomStore
+import com.example.dgg.data.SettingsStore
 import com.example.dgg.databinding.ViewFloatStatusBinding
 import com.example.dgg.engine.EngineProgress
 import com.example.dgg.engine.EngineState
 import com.example.dgg.engine.TaskEngine
+import android.view.inputmethod.InputMethodManager
+import com.example.dgg.util.CurrentRoomAnchor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -66,6 +72,10 @@ class FloatWindowService : Service() {
     /** 面板是否展开。收起态只有一个胶囊，展开态才有按钮 */
     @Volatile
     private var expanded = false
+
+    /** 「因编辑目标而暂停」的标记：确定/收起时据此恢复任务 */
+    @Volatile
+    private var wasRunningBeforeEdit = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -118,6 +128,11 @@ class FloatWindowService : Service() {
             stopSelf()
         }
         b.floatReset.setOnClickListener { onResetToday() }
+        b.floatSetTarget.setOnClickListener { onToggleTargetEditor() }
+        b.floatTargetOk.setOnClickListener { onApplyTarget() }
+        b.floatShowNames.setOnClickListener { onToggleNames() }
+        b.floatSaveRoom.setOnClickListener { onSaveRoom() }
+        b.floatPickRoom.setOnClickListener { onToggleRooms() }
 
         // 拖动只挂在胶囊和面板标题上：挂在整块 root 会让面板里的按钮在滑动时误吞事件
         val drag = DragListener()
@@ -145,6 +160,12 @@ class FloatWindowService : Service() {
         expanded = value
         b.floatPill.visibility = if (value) View.GONE else View.VISIBLE
         b.floatPanel.visibility = if (value) View.VISIBLE else View.GONE
+        // 收起时把编辑区/名单一并关掉并归还焦点（否则挡住抖音的触摸与返回键）
+        if (!value) {
+            b.floatTargetBox.visibility = View.GONE
+            b.floatNamesBox.visibility = View.GONE
+            setWindowFocusable(false)
+        }
         // 展开时面板自带背景，root 的胶囊底色要撤掉，否则圆角会漏出一圈
         b.floatRoot.setBackgroundResource(if (value) 0 else R.drawable.bg_float_pill)
         if (animate) LogStore.d(TAG, if (value) "悬浮面板已展开" else "悬浮面板已收起")
@@ -236,6 +257,193 @@ class FloatWindowService : Service() {
         render(TaskEngine.progress.value)
     }
 
+    // ==================== 设置关注 ====================
+
+    /**
+     * 切换「设置关注」输入行。
+     *
+     * 悬浮窗平时是 [WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE]，EditText 拿不到焦点、
+     * 键盘也弹不出来；展开输入行期间必须临时把窗口切成可聚焦——代价是编辑期间
+     * 返回键/触摸会先给悬浮窗，所以收起时务必切回去。
+     *
+     * 另一个代价必须知道：窗口抢焦点后无障碍视角里抖音就「不 active」了，
+     * 正在跑的任务会读不到界面（实测表现为页面判定 UNKNOWN → 连续 4 轮采不到评论 → 中止）。
+     * 所以展开时**自动暂停任务**，确定/收起时再恢复——用户在打字的这几秒，脚本本来也不该乱动。
+     */
+    private fun onToggleTargetEditor() {
+        val b = binding ?: return
+        val show = b.floatTargetBox.visibility != View.VISIBLE
+        b.floatTargetBox.visibility = if (show) View.VISIBLE else View.GONE
+        b.floatNamesBox.visibility = View.GONE
+        setWindowFocusable(show)
+        if (show) {
+            // 见上：编辑期间任务必须停住，否则读不到界面会被当成异常停机
+            if (TaskEngine.progress.value.state.isActive) {
+                wasRunningBeforeEdit = true
+                TaskEngine.pause()
+                LogStore.i(TAG, "展开目标编辑，任务自动暂停")
+            }
+            b.floatTargetInput.setText(
+                SettingsStore.get(this).current.followTarget.toString()
+            )
+            b.floatTargetInput.requestFocus()
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            runCatching { imm.showSoftInput(b.floatTargetInput, InputMethodManager.SHOW_IMPLICIT) }
+        } else {
+            resumeIfPausedByEdit()
+        }
+    }
+
+    /** 编辑结束（确定/收起）后把「因编辑而暂停」的任务恢复回去 */
+    private fun resumeIfPausedByEdit() {
+        if (!wasRunningBeforeEdit) return
+        wasRunningBeforeEdit = false
+        if (TaskEngine.progress.value.state == EngineState.PAUSED) {
+            TaskEngine.resume()
+            LogStore.i(TAG, "目标编辑结束，任务自动恢复")
+        }
+    }
+
+    // ==================== 收藏 / 选择直播间 ====================
+
+    /**
+     * 收藏当前直播间。
+     *
+     * 取的是直播间左上角的主播昵称（见 [CurrentRoomAnchor]）。
+     * 关键细节：**面板展开着的时候抖音窗口不是 active**，系统只给裁剪后的节点树，
+     * 昵称根本读不到（实测 root 只剩 2 层）。所以必须先把面板收起、等窗口
+     * 恢复 active 再读，读完重新展开——用户看到的是面板闪一下。
+     */
+    private fun onSaveRoom() {
+        scope.launch {
+            val wasExpanded = expanded
+            // 优先用 Flow 每轮记住的主播昵称（面板展开时实时树读不到，见 RoomStore.lastAnchor）；
+            // 任务没在跑才走实时读（此时先把面板收起让抖音窗口恢复 active）
+            val name = RoomStore.get(this@FloatWindowService).lastAnchor
+                ?: run {
+                    if (wasExpanded) setExpanded(false)
+                    delay(600)
+                    CurrentRoomAnchor.currentAnchorName(DggAccessibilityService.current)
+                }
+            if (name == null) {
+                LogStore.w(TAG, "收藏直播间失败：当前读不到主播昵称（可能不在直播间）")
+            } else {
+                val added = RoomStore.get(this@FloatWindowService).add(name)
+                if (added) {
+                    LogStore.i(TAG, "已收藏直播间「$name」（共 ${RoomStore.get(this@FloatWindowService).all().size} 个）")
+                } else {
+                    LogStore.d(TAG, "「$name」已在收藏里")
+                }
+            }
+            if (wasExpanded) {
+                setExpanded(true)
+                render(TaskEngine.progress.value)
+            }
+        }
+    }
+
+    /**
+     * 展开/收起收藏列表。每个收藏项一行，点它 = 「选择这个直播间」：
+     * 写入 pending 目标，下次点「开始服务」时脚本先自动进这个房间再开始干活。
+     */
+    private fun onToggleRooms() {
+        val b = binding ?: return
+        val show = b.floatRoomsBox.visibility != View.VISIBLE
+        b.floatRoomsBox.visibility = if (show) View.VISIBLE else View.GONE
+        b.floatNamesBox.visibility = View.GONE
+        b.floatTargetBox.visibility = View.GONE
+        if (!show) return
+
+        val rooms = RoomStore.get(this).all()
+        val list = b.floatRoomsList
+        list.removeAllViews()
+        if (rooms.isEmpty()) {
+            list.addView(newRoomRow("还没有收藏的直播间。进入某个直播间后点「收藏直播间」"))
+            return
+        }
+        val pending = RoomStore.get(this).takePendingTarget()
+        if (pending != null) RoomStore.get(this).setPendingTarget(pending) // 读出来再放回去，只做展示
+
+        rooms.forEach { room ->
+            val mark = if (room.nickname == pending) " ✓已选择" else ""
+            list.addView(
+                newRoomRow("${room.nickname}$mark").apply {
+                    setOnClickListener {
+                        RoomStore.get(this@FloatWindowService).setPendingTarget(room.nickname)
+                        LogStore.i(
+                            TAG,
+                            "已选择直播间「${room.nickname}」，下次点「开始服务」时自动进入"
+                        )
+                        // 重绘一遍列表把 ✓ 标记挪到新选中的行
+                        onToggleRooms()
+                        onToggleRooms()
+                    }
+                }
+            )
+        }
+    }
+
+    private fun newRoomRow(text: String): TextView =
+        TextView(this).apply {
+            this.text = text
+            setTextColor(ContextCompat.getColor(this@FloatWindowService, R.color.text_primary))
+            textSize = 11f
+            setPadding(dp(4), dp(6), dp(4), dp(6))
+        }
+
+    private fun onApplyTarget() {
+        val b = binding ?: return
+        val value = b.floatTargetInput.text?.toString()?.trim()?.toIntOrNull()
+        if (value == null || value < 1 || value > 10_000) {
+            b.floatTargetInput.error = "1 ~ 10000"
+            return
+        }
+        SettingsStore.get(this).edit { it.copy(followTarget = value) }
+        LogStore.i(TAG, "目标关注数量已改为 $value（悬浮面板实时修改，下一轮生效）")
+        b.floatTargetBox.visibility = View.GONE
+        setWindowFocusable(false)
+        resumeIfPausedByEdit()
+        render(TaskEngine.progress.value)
+    }
+
+    // ==================== 已关人数 ====================
+
+    private fun onToggleNames() {
+        val b = binding ?: return
+        val show = b.floatNamesBox.visibility != View.VISIBLE
+        b.floatNamesBox.visibility = if (show) View.VISIBLE else View.GONE
+        b.floatTargetBox.visibility = View.GONE
+        setWindowFocusable(false)
+        if (show) {
+            val names = FollowedStore.get(this).allNames()
+            b.floatNamesList.text = if (names.isEmpty()) {
+                "还没有关注过任何人"
+            } else {
+                buildString {
+                    names.take(MAX_NAMES_SHOWN).forEachIndexed { i, n ->
+                        if (i > 0) append('\n')
+                        append("${i + 1}. $n")
+                    }
+                    if (names.size > MAX_NAMES_SHOWN) {
+                        append("\n…… 共 ${names.size} 人")
+                    }
+                }
+            }
+            LogStore.d(TAG, "展开已关名单：共 ${names.size} 人")
+        }
+    }
+
+    /** 编辑输入框期间临时把窗口切成可聚焦；收起必须恢复，否则会挡住抖音的触摸与返回键 */
+    private fun setWindowFocusable(focusable: Boolean) {
+        val lp = params ?: return
+        val root = binding?.root ?: return
+        val want = if (focusable) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        if (lp.flags == want) return
+        lp.flags = want
+        runCatching { windowManager.updateViewLayout(root, lp) }
+            .onFailure { LogStore.w(TAG, "切换窗口焦点失败：${it.message}") }
+    }
+
     // ==================== 状态跟随 ====================
 
     private fun observe() {
@@ -295,7 +503,10 @@ class FloatWindowService : Service() {
         }
 
         val today = FollowedStore.get(this).todayCount()
-        b.floatToday.text = "今日累计 $today"
+        val store = FollowedStore.get(this)
+        b.floatSession.text = "本场 ${progress.followed}"
+        b.floatToday.text = "今日 $today"
+        b.floatKnown.text = "已关 ${store.knownCount()}"
 
         val active = progress.state.isActive
         b.floatToggle.visibility = if (active) View.VISIBLE else View.GONE
@@ -333,6 +544,9 @@ class FloatWindowService : Service() {
 
         /** 引擎从未启动时，悬浮窗最多空挂这么久 */
         private const val IDLE_SELF_CLOSE_MS = 5_000L
+
+        /** 「已关人数」名单最多展示条数（全量在日志里） */
+        private const val MAX_NAMES_SHOWN = 40
 
         fun start(context: Context) {
             val intent = Intent(context, FloatWindowService::class.java)

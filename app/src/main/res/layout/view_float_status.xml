@@ -179,7 +179,7 @@
             android:layout_marginTop="10dp"
             android:background="@color/divider" />
 
-        <!-- 今日累计 + 重置 -->
+        <!-- 统计行：本场涨粉 · 今日累计 · 已关人数（对标竞品「本场涨粉/今日累计/已关人数」） -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -188,11 +188,29 @@
             android:orientation="horizontal">
 
             <TextView
+                android:id="@+id/float_session"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="本场 0"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp" />
+
+            <TextView
                 android:id="@+id/float_today"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="今日累计 0"
+                android:text="今日 0"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp" />
+
+            <TextView
+                android:id="@+id/float_known"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="已关 0"
                 android:textColor="@color/text_secondary"
                 android:textSize="11sp" />
 
@@ -208,6 +226,147 @@
                 android:textColor="@color/brand_red"
                 android:textSize="11sp" />
         </LinearLayout>
+
+        <!-- 设置关注 / 已关人数（对标竞品同名按钮） -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/float_set_target"
+                android:layout_width="0dp"
+                android:layout_height="30dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_btn_ghost"
+                android:gravity="center"
+                android:text="设置关注"
+                android:textColor="@color/text_primary"
+                android:textSize="11sp" />
+
+            <TextView
+                android:id="@+id/float_show_names"
+                android:layout_width="0dp"
+                android:layout_height="30dp"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_btn_ghost"
+                android:gravity="center"
+                android:text="已关人数"
+                android:textColor="@color/text_primary"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- 「设置关注」展开的输入行。
+             悬浮窗默认 FLAG_NOT_FOCUSABLE，EditText 拿不到焦点也弹不出键盘；
+             点开时由 FloatWindowService 临时把窗口切成可聚焦，收起时切回去。 -->
+        <LinearLayout
+            android:id="@+id/float_target_box"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <EditText
+                android:id="@+id/float_target_input"
+                android:layout_width="0dp"
+                android:layout_height="34dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_input"
+                android:hint="目标数量"
+                android:importantForAutofill="no"
+                android:inputType="number"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:textColor="@color/text_primary"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/float_target_ok"
+                android:layout_width="wrap_content"
+                android:layout_height="34dp"
+                android:layout_marginStart="6dp"
+                android:background="@drawable/bg_btn_small"
+                android:gravity="center"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:text="确定"
+                android:textColor="@color/white"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- 「已关人数」展开的名单（最新关注在最前） -->
+        <ScrollView
+            android:id="@+id/float_names_box"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:background="@drawable/bg_hint"
+            android:maxHeight="150dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/float_names_list"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:lineSpacingExtra="3dp"
+                android:padding="8dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="10sp" />
+        </ScrollView>
+
+        <!-- 收藏直播间 / 选择直播间（对标竞品同名按钮） -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/float_save_room"
+                android:layout_width="0dp"
+                android:layout_height="30dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_btn_ghost"
+                android:gravity="center"
+                android:text="收藏直播间"
+                android:textColor="@color/text_primary"
+                android:textSize="11sp" />
+
+            <TextView
+                android:id="@+id/float_pick_room"
+                android:layout_width="0dp"
+                android:layout_height="30dp"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_btn_ghost"
+                android:gravity="center"
+                android:text="选择直播间"
+                android:textColor="@color/text_primary"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- 「选择直播间」展开的收藏列表；行由 FloatWindowService 动态生成，每行可点 -->
+        <ScrollView
+            android:id="@+id/float_rooms_box"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:background="@drawable/bg_hint"
+            android:maxHeight="150dp"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/float_rooms_list"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="6dp" />
+        </ScrollView>
 
         <TextView
             android:id="@+id/float_close"

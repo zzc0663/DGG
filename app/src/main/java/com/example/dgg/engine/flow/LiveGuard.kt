@@ -86,9 +86,13 @@ object LiveGuard {
     /**
      * 确保「正在抖音的某个直播间里」。
      *
+     * @param allowAutoNavigate 允许「首页 → 直播页签 → 进房」的自动导航。
+     *   只在**用户明确表达了意图**的场合传 true：任务刚启动（他点了「开始服务」）、
+     *   或我们刚把抖音拉回来（他自己离开的）。任务跑到一半读到首页时不导航——
+     *   那可能是用户想回个消息，抢他的界面等于抢手机。
      * @return true = 可以继续；false = 已尽力恢复仍不行，调用方应带原因中止
      */
-    suspend fun ensureOnAir(ctx: FlowContext): Boolean {
+    suspend fun ensureOnAir(ctx: FlowContext, allowAutoNavigate: Boolean = false): Boolean {
         // ① 前台不是抖音：先给一次窗口期（可能只是切窗的中间态），确认丢了就自动拉回。
         //    记下「是我们拉回来的」——只有这种情况才允许后面自动导航进房，
         //    避免脚本自己跑偏时在抖音里到处乱点。
@@ -146,9 +150,11 @@ object LiveGuard {
             }
         }
 
-        // ⑥ 拉回抖音后落在首页：点顶部「直播」页签进直播频道，再走一次进房。
-        // 只在「刚才是我们把它拉回来的」时做——否则用户可能只是在刷视频，不该抢他的界面。
-        if (page == PageState.HOME && relaunched && enterFromHome(ctx)) return true
+        // ⑥ 拉回抖音后（或任务刚启动）落在首页：点顶部「直播」页签进直播频道，再走一次进房。
+        // 只在「用户明确表达过意图」时做——任务跑到一半发现自己在首页，说明用户可能想回消息，不抢。
+        if (page == PageState.HOME && (relaunched || allowAutoNavigate) && enterFromHome(ctx)) {
+            return true
+        }
 
         // ⑦ 兜底：这几秒里用户可能又切走了
         if (!ctx.actions.isDouyinForeground()) {

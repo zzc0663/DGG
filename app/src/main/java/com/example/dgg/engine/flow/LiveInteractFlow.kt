@@ -3,6 +3,7 @@ package com.example.dgg.engine.flow
 import android.graphics.Rect
 import android.os.SystemClock
 import com.example.dgg.data.LogStore
+import com.example.dgg.data.RoomStore
 import com.example.dgg.data.PresetComments
 import com.example.dgg.data.Settings
 import com.example.dgg.engine.Flow
@@ -40,6 +41,18 @@ class LiveInteractFlow : Flow {
                 "等待 ${DOUYIN_FOREGROUND_TIMEOUT_MS / 1000} 秒仍未切到抖音前台。" +
                     "请手动打开抖音并进入目标直播间后再开始"
             )
+        }
+
+        // 「选择直播间」一次性指令：同 M2，先导航进收藏的房间
+        RoomStore.get(ctx.appContext).takePendingTarget()?.let { room ->
+            ctx.publish(message = "正在进入收藏的直播间「$room」")
+            LogStore.i(TAG, "检测到待进入的收藏直播间「$room」，先导航")
+            if (!EnterSavedRoomNavigator.enter(ctx, room)) {
+                throw FlowAbortException(
+                    "未能自动进入收藏的直播间「$room」（原因见上方日志）。" +
+                        "可改为手动进入直播间后重新开始，或检查主播是否在开播"
+                )
+            }
         }
 
         if (settings.enterMode != ENTER_MANUAL) {

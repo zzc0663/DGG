@@ -6,12 +6,14 @@ import android.content.pm.ApplicationInfo
 import android.graphics.Path
 import android.os.Handler
 import android.os.Looper
+import android.view.accessibility.AccessibilityNodeInfo
 import com.example.dgg.data.LogStore
 import com.example.dgg.data.SettingsStore
 import com.example.dgg.engine.Actions
 import com.example.dgg.engine.LocatorConfigLoader
 import com.example.dgg.engine.PageDetector
 import com.example.dgg.engine.risk.Humanizer
+import com.example.dgg.util.ActiveWindow
 import com.example.dgg.util.NodeDumper
 import java.io.File
 import java.util.Locale
@@ -164,6 +166,47 @@ object DebugChannel {
                     .addStroke(GestureDescription.StrokeDescription(path, 0, 400))
                     .build()
                 LogStore.i(TAG, "SWIPE (${v[0]},${v[1]})→(${v[2]},${v[3]})：${service.dispatchGesture(g, null, null)}")
+            }
+
+            cmd.startsWith("TEXT ") -> {
+                // 调试通道专用的中文输入：`adb shell input text` 不支持中文，
+                // 这里用无障碍 SET_TEXT 一次性写入第一个可编辑节点。
+                val text = cmd.removePrefix("TEXT ")
+                if (service == null || text.isBlank()) {
+                    LogStore.w(TAG, "TEXT 失败：service=${service != null} 参数空")
+                    return
+                }
+                val root = ActiveWindow.root(service)
+                if (root == null) {
+                    LogStore.e(TAG, "TEXT 失败：读不到活动窗口")
+                    return
+                }
+                val queue = ArrayDeque<AccessibilityNodeInfo>()
+                queue.addLast(root)
+                var visited = 0
+                var done = false
+                while (queue.isNotEmpty() && visited < 1200 && !done) {
+                    val node = queue.removeFirst()
+                    visited++
+                    if (node.isEditable) {
+                        val ok = node.performAction(
+                            AccessibilityNodeInfo.ACTION_SET_TEXT,
+                            android.os.Bundle().apply {
+                                putCharSequence(
+                                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                                    text
+                                )
+                            }
+                        )
+                        LogStore.i(TAG, "TEXT \"$text\"：$ok（第 $visited 个节点命中 editable）")
+                        done = true
+                        break
+                    }
+                    for (i in 0 until node.childCount) {
+                        node.getChild(i)?.let { queue.addLast(it) }
+                    }
+                }
+                if (!done) LogStore.e(TAG, "TEXT 失败：页面上没有可编辑节点")
             }
 
             else -> LogStore.w(TAG, "未知命令：$cmd")

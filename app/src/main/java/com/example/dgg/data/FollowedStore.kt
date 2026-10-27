@@ -35,6 +35,12 @@ class FollowedStore private constructor(private val prefs: SharedPreferences) {
 
     fun knownCount(): Int = names().size
 
+    /**
+     * 全部已关注昵称，**按关注时间倒序**（最新关注的最前）。
+     * 悬浮面板「已关人数」直接展示它；数据本身就是这个顺序（markFollowed 追加到尾部）。
+     */
+    fun allNames(): List<String> = names().toList().asReversed()
+
     fun todayCount(): Int {
         if (prefs.getString(KEY_DAY, null) != today()) return 0
         return prefs.getInt(KEY_DAY_COUNT, 0)

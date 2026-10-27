@@ -4,6 +4,9 @@ import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.dgg.data.FollowedStore
 import com.example.dgg.data.LogStore
+import com.example.dgg.data.RoomStore
+import com.example.dgg.util.CurrentRoomAnchor
+import com.example.dgg.data.SettingsStore
 import com.example.dgg.engine.Flow
 import com.example.dgg.engine.FlowAbortException
 import com.example.dgg.engine.FlowContext
@@ -40,13 +43,28 @@ class FollowFromLiveFlow : Flow {
             )
         }
 
+        // 「选择直播间」的一次性指令：用户在悬浮面板点选了收藏的房间，
+        // 先自动导航进去再开始干活。失败明确停机——绝不退化成随便进一个直播间。
+        RoomStore.get(ctx.appContext).takePendingTarget()?.let { room ->
+            ctx.publish(message = "正在进入收藏的直播间「$room」")
+            LogStore.i(TAG, "检测到待进入的收藏直播间「$room」，先导航")
+            if (!EnterSavedRoomNavigator.enter(ctx, room)) {
+                throw FlowAbortException(
+                    "未能自动进入收藏的直播间「$room」（原因见上方日志）。" +
+                        "可改为手动进入直播间后重新开始，或检查主播是否在开播"
+                )
+            }
+        }
+
         val remaining = store.remainingToday(settings.dailyLimit)
         if (remaining <= 0) {
             throw FlowAbortException(
                 "今日关注已达上限 ${settings.dailyLimit}（已关注 ${store.todayCount()}），明天再跑"
             )
         }
-        val target = minOf(settings.followTarget.coerceAtLeast(1), remaining)
+        // 目标数在循环里**每轮重读**：悬浮面板上的「设置关注」要实时生效，
+        // 不能要求用户停止任务再改。启动时只校验一次额度。
+        var target = minOf(settings.followTarget.coerceAtLeast(1), remaining)
         ctx.publish(target = target, message = "准备就绪")
         LogStore.i(
             TAG,
@@ -69,16 +87,46 @@ class FollowFromLiveFlow : Flow {
          */
         var anchor: String? = null
 
+        /** 只有第一轮允许「首页→直播页签→进房」的自动导航，理由见主循环里的注释 */
+        var firstEnsure = true
+
+        /**
+         * 上一次读到的「界面设置目标数」。
+         *
+         * 实时目标只认**这个字段的变化**（用户在悬浮面板上改了）。不能拿
+         * `remainingToday` 参与比较——它随每次关注成功递减，拿它比会让每一轮都
+         * 误触发一次「目标数已调整」，日志刷屏还把真正的人工修改淹没掉。
+         */
+        var lastSeenTargetSetting = settings.followTarget
+
         while (followed < target) {
             if (ctx.stopped()) return
             ctx.awaitResume()
             ctx.guard()
 
+            // 实时目标：面板上改了立刻生效（调小会在达到后自然结束，调大继续跑）
+            val fresh = SettingsStore.get(ctx.appContext).current
+            if (fresh.followTarget != lastSeenTargetSetting) {
+                lastSeenTargetSetting = fresh.followTarget
+                val newTarget = minOf(
+                    fresh.followTarget.coerceAtLeast(1),
+                    store.remainingToday(fresh.dailyLimit)
+                )
+                if (newTarget != target) {
+                    LogStore.i(TAG, "目标数已从 $target 调整为 $newTarget（悬浮面板实时修改）")
+                    target = newTarget
+                    ctx.publish(target = target, message = "目标数已改为 $newTarget")
+                    if (followed >= target) break
+                }
+            }
+
             // 每轮先确认「还在抖音的直播间里」，做不到就尽力恢复：
             // 人为切换直播间（转场期间读不到直播间特征）会耐心等新房间，
             // 退出抖音会被自动拉回，真的恢复不了才中止。
             // 早期这里是「一 UNKNOWN 就按返回」，结果把用户刚切到的直播间退掉了。
-            if (!LiveGuard.ensureOnAir(ctx)) {
+            // 第一次调用允许自动导航（首页→直播页签→进房）：用户刚点了「开始服务」，
+            // 明确要让脚本自己进直播间；之后的轮次不导航（跑一半在首页=用户想干别的，不抢）。
+            if (!LiveGuard.ensureOnAir(ctx, allowAutoNavigate = firstEnsure)) {
                 val detection = ctx.detector.detect()
                 throw FlowAbortException(
                     "已经不在直播间，且自动恢复失败。" +
@@ -86,6 +134,16 @@ class FollowFromLiveFlow : Flow {
                         "前台${if (ctx.actions.isDouyinForeground()) "是抖音但不在直播间" else "已不是抖音"}。" +
                         "请打开抖音并停在目标直播间后重新开始"
                 )
+            }
+            firstEnsure = false
+
+            // 记住当前主播昵称：悬浮面板「收藏直播间」在面板展开时读不到实时树，
+            // 用的就是这里每轮刷新的值（走快照缓存，无额外遍历）
+            CurrentRoomAnchor.anchorFromSnapshot(ctx.actions)?.let {
+                if (it != RoomStore.get(ctx.appContext).lastAnchor) {
+                    RoomStore.get(ctx.appContext).rememberAnchor(it)
+                    LogStore.d(TAG, "当前直播间主播：$it")
+                }
             }
 
             // 追最新：等「列表底部那一行」换人，说明列表已经滚到了比上一轮更新的评论。
