@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 次要操作（关闭悬浮窗）：只描边不填充，视觉权重最低 -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="#14000000">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#00000000" />
+            <corners android:radius="6dp" />
+            <stroke
+                android:width="1dp"
+                android:color="@color/divider" />
+        </shape>
+    </item>
+</ripple>

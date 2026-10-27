@@ -159,30 +159,10 @@ class LiveInteractFlow : Flow {
     /**
      * 确认还在直播间。被浮层盖住（键盘、礼物面板、资料卡）就按一次返回把它关掉。
      *
-     * 两条保护，都是实测踩出来的：
-     * 1. **一次 UNKNOWN 不算数**。收键盘、窗口切换的中间态会让某一刻读不到应用窗口，
-     *    上一版就是靠一次误判按了返回，把人好好的直播间退掉了（日志里表现为
-     *    「已发评论 1」紧跟着「已经不在直播间」）。
-     * 2. **前台不是抖音就绝不按返回**——返回键作用于当前前台，按了退的是别的应用。
+     * 与 M2 共用 [LiveGuard]：容忍人为切换直播间的转场（期间读到 UNKNOWN 是正常的，
+     * 早期实现在这里按返回，把用户刚切到的直播间退掉了），会在抖音不在前台时自动拉回。
      */
-    private suspend fun ensureLiveRoom(ctx: FlowContext): Boolean {
-        repeat(CONFIRM_CHECKS) { i ->
-            ctx.actions.invalidateSnapshot()
-            if (ctx.detector.detect().page == PageState.LIVE_ROOM) return true
-            if (i < CONFIRM_CHECKS - 1) delay(RECHECK_MS)
-        }
-
-        if (!ctx.actions.isDouyinForeground()) {
-            LogStore.w(TAG, "连续 $CONFIRM_CHECKS 次读不到直播间，且前台不是抖音——不按返回，直接停")
-            return false
-        }
-
-        LogStore.w(TAG, "连续 $CONFIRM_CHECKS 次不在直播间，按一次返回尝试关掉浮层")
-        ctx.actions.back()
-        ctx.settle(RECOVER_SETTLE_MS)
-        ctx.actions.invalidateSnapshot()
-        return ctx.detector.detect().page == PageState.LIVE_ROOM
-    }
+    private suspend fun ensureLiveRoom(ctx: FlowContext): Boolean = LiveGuard.ensureOnAir(ctx)
 
     // ==================== 评论内容 ====================
 

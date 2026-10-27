@@ -478,7 +478,7 @@ class MainActivity : AppCompatActivity() {
         binding.tvEngineAction.text = if (active) "停止" else "关闭"
         binding.tvEngineAction.setOnClickListener {
             if (TaskEngine.progress.value.state.isActive) {
-                EngineController.stop("界面状态条停止")
+                EngineController.stop(this, "界面状态条停止")
             } else {
                 binding.engineStatusBar.visibility = View.GONE
             }

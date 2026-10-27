@@ -186,9 +186,10 @@ class ControlService : Service() {
         progressJob?.cancel()
         progressJob = null
 
-        // 悬浮窗与本服务同进程，先主动撤掉，避免留下一个「点不动的停止键」
-        runCatching { stopService(Intent(this, FloatWindowService::class.java)) }
-
+        // 刻意**不撤悬浮窗**：任务结束后最需要看到的就是「为什么停了」。
+        // 早期实现在这里 stopService(FloatWindowService)，结果用户点「结束」后小窗直接消失，
+        // 既看不到结论，观感上还像是被踢回了应用。现在由悬浮窗自己保留终态面板，
+        // 用户点「关闭悬浮窗」才撤（见 FloatWindowService.onFinish）。
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -196,7 +197,7 @@ class ControlService : Service() {
             stopForeground(true)
         }
         stopSelf()
-        LogStore.i(TAG, "前台服务已退出：$reason")
+        LogStore.i(TAG, "前台服务已退出：$reason（悬浮窗保留终态面板）")
     }
 
     override fun onDestroy() {

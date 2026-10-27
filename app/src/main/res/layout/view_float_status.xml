@@ -1,51 +1,223 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  悬浮状态胶囊：状态点 + 一行摘要 + 停止键。
-  刻意做得很窄（≤ 210dp），压在抖音界面上不能挡住关注按钮那种高频操作的区域；
-  用户也可以拖动它，见 FloatWindowService 的触摸处理。
+  悬浮窗：收起态是一条窄胶囊，展开态是控制面板。
+
+  为什么要展开态：任务跑起来之后用户的注意力在抖音上，回抖关关看进度等于把主播画面切走，
+  再切回来还可能掉出直播间。所以「看进度、暂停、结束」全部就地完成，**不跳任何界面**。
+
+  收起态刻意做得很窄（≤ 210dp），压在抖音界面上不能挡住关注按钮那种高频操作的区域；
+  展开态由用户主动点开，挡住也没关系，点右上角箭头就能收回去。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/float_root"
     android:layout_width="wrap_content"
     android:layout_height="wrap_content"
     android:background="@drawable/bg_float_pill"
-    android:gravity="center_vertical"
-    android:orientation="horizontal"
-    android:paddingStart="10dp"
-    android:paddingTop="6dp"
-    android:paddingEnd="5dp"
-    android:paddingBottom="6dp">
+    android:orientation="vertical">
 
-    <View
-        android:id="@+id/float_dot"
-        android:layout_width="8dp"
-        android:layout_height="8dp"
-        android:background="@drawable/bg_dot_green" />
-
-    <TextView
-        android:id="@+id/float_status"
+    <!-- ==================== 收起态：胶囊 ==================== -->
+    <LinearLayout
+        android:id="@+id/float_pill"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginStart="6dp"
-        android:ellipsize="end"
-        android:maxWidth="150dp"
-        android:singleLine="true"
-        android:text="准备中"
-        android:textColor="@color/text_primary"
-        android:textSize="11sp" />
-
-    <TextView
-        android:id="@+id/float_stop"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="8dp"
-        android:background="@drawable/bg_btn_small"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
         android:paddingStart="10dp"
-        android:paddingTop="4dp"
+        android:paddingTop="6dp"
         android:paddingEnd="10dp"
-        android:paddingBottom="4dp"
-        android:text="@string/notification_action_stop"
-        android:textColor="@color/white"
-        android:textSize="11sp"
-        android:textStyle="bold" />
+        android:paddingBottom="6dp">
+
+        <View
+            android:id="@+id/float_dot"
+            android:layout_width="8dp"
+            android:layout_height="8dp"
+            android:background="@drawable/bg_dot_green" />
+
+        <TextView
+            android:id="@+id/float_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:ellipsize="end"
+            android:maxWidth="132dp"
+            android:singleLine="true"
+            android:text="准备中"
+            android:textColor="@color/text_primary"
+            android:textSize="11sp" />
+
+        <!-- 展开：点这一小块，而不是点整条，避免「想拖动却展开了」 -->
+        <TextView
+            android:id="@+id/float_expand"
+            android:layout_width="26dp"
+            android:layout_height="22dp"
+            android:layout_marginStart="2dp"
+            android:gravity="center"
+            android:text="⌄"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <!-- ==================== 展开态：控制面板 ==================== -->
+    <LinearLayout
+        android:id="@+id/float_panel"
+        android:layout_width="208dp"
+        android:layout_height="wrap_content"
+        android:background="@drawable/bg_float_panel"
+        android:orientation="vertical"
+        android:paddingStart="12dp"
+        android:paddingTop="10dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="10dp"
+        android:visibility="gone">
+
+        <!-- 标题行：状态点 + 状态 + 收起箭头 -->
+        <LinearLayout
+            android:id="@+id/float_header"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <View
+                android:id="@+id/float_dot_panel"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:background="@drawable/bg_dot_green" />
+
+            <TextView
+                android:id="@+id/float_state"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:layout_weight="1"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:text="运行中"
+                android:textColor="@color/text_primary"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/float_collapse"
+                android:layout_width="26dp"
+                android:layout_height="22dp"
+                android:gravity="center"
+                android:text="⌃"
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- 大号计数：24/200 -->
+        <TextView
+            android:id="@+id/float_counter"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="0/0"
+            android:textColor="@color/brand_red"
+            android:textSize="26sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/float_counter_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="已关注"
+            android:textColor="@color/text_secondary"
+            android:textSize="10sp" />
+
+        <!-- 一句话说明：正在做什么 / 为什么停了 -->
+        <TextView
+            android:id="@+id/float_message"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:ellipsize="end"
+            android:maxLines="2"
+            android:text=""
+            android:textColor="@color/text_secondary"
+            android:textSize="11sp" />
+
+        <!-- 主操作：暂停/继续 + 结束 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/float_toggle"
+                android:layout_width="0dp"
+                android:layout_height="34dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_btn_small"
+                android:gravity="center"
+                android:text="暂停"
+                android:textColor="@color/white"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/float_finish"
+                android:layout_width="0dp"
+                android:layout_height="34dp"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_btn_danger_soft"
+                android:gravity="center"
+                android:text="结束"
+                android:textColor="@color/brand_red"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="10dp"
+            android:background="@color/divider" />
+
+        <!-- 今日累计 + 重置 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/float_today"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="今日累计 0"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp" />
+
+            <TextView
+                android:id="@+id/float_reset"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingStart="8dp"
+                android:paddingTop="4dp"
+                android:paddingEnd="8dp"
+                android:paddingBottom="4dp"
+                android:text="重置"
+                android:textColor="@color/brand_red"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/float_close"
+            android:layout_width="match_parent"
+            android:layout_height="32dp"
+            android:layout_marginTop="6dp"
+            android:background="@drawable/bg_btn_ghost"
+            android:gravity="center"
+            android:text="关闭悬浮窗"
+            android:textColor="@color/text_secondary"
+            android:textSize="11sp" />
+    </LinearLayout>
 </LinearLayout>

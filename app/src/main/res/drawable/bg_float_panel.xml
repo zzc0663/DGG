@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 悬浮窗展开面板背景：接近不透明（压在抖音画面上要能看清文字），圆角比胶囊小一点 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#FAFFFFFF" />
+    <corners android:radius="14dp" />
+    <stroke
+        android:width="1dp"
+        android:color="#1F000000" />
+</shape>

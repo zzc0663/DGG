@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.dgg.data.LogStore
 import com.example.dgg.engine.Flow
 import com.example.dgg.engine.TaskEngine
+import com.example.dgg.util.ActiveWindow
 import com.example.dgg.util.AppPermissions
 import com.example.dgg.util.DouyinLauncher
 
@@ -35,7 +36,18 @@ object EngineController {
         ControlService.start(app)
 
         if (launchDouyin) {
-            if (DouyinLauncher.launch(app)) {
+            // **已经在前台就不要再 launch**。
+            //
+            // 实测过的坑：用户已经停在一个直播间里，点「开始服务」时无条件
+            // `getLaunchIntentForPackage().startActivity()` 会让抖音重走一遍启动流程
+            // （LivePlayActivity 被换掉 → splash → 首页），用户精心选好的直播间当场没了，
+            // 脚本随后只能在「不在直播间」里中止。抖音在前台时它本来就在正确的地方。
+            val front = runCatching {
+                ActiveWindow.root(DggAccessibilityService.current)?.packageName?.toString()
+            }.getOrNull()
+            if (front == DouyinLauncher.PACKAGE) {
+                LogStore.i(TAG, "抖音已在前台，不再重复拉起（重复拉起会打断当前直播间）")
+            } else if (DouyinLauncher.launch(app)) {
                 LogStore.i(TAG, "已拉起抖音，等待目标界面就绪")
             } else {
                 LogStore.w(TAG, "拉起抖音失败，将依赖用户手动切到抖音")
@@ -59,11 +71,16 @@ object EngineController {
 
     /**
      * 停止。只调引擎：进入终态后 [ControlService] 与 [FloatWindowService]
-     * 各自的进度收集器会把它们自己关掉，这样「状态」只有一个来源，
+     * 各自的进度收集器会处理自己的去留，这样「状态」只有一个来源，
      * 不会出现「引擎停了但通知还挂着在转」。
+     *
+     * [context] 不为 null 表示是**从抖关关界面**点的停止：此时顺手撤掉悬浮窗，
+     * 它的终态面板在这里是重复信息，还挡着用户自己的界面。
+     * 悬浮窗上点「结束」不走这条路（直接调 TaskEngine），面板要保留给人看结论。
      */
-    fun stop(reason: String = "手动停止") {
+    fun stop(context: Context? = null, reason: String = "手动停止") {
         LogStore.i(TAG, "停止任务：$reason")
         TaskEngine.stop(reason)
+        if (context != null) FloatWindowService.stop(context)
     }
 }

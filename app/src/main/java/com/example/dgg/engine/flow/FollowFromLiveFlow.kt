@@ -12,6 +12,7 @@ import com.example.dgg.engine.PageState
 import com.example.dgg.engine.Target
 import com.example.dgg.util.Texts
 import kotlinx.coroutines.delay
+import kotlin.random.Random
 
 /**
  * M2 主流程：**直播间评论里随机挑人关注**。
@@ -73,10 +74,19 @@ class FollowFromLiveFlow : Flow {
             ctx.awaitResume()
             ctx.guard()
 
-            // 点评论有几率误开礼物面板/操作栏之类的浮层（尤其点到滚动中的失效坐标），
-            // 一旦盖上，后面所有采集都是在浮层上做的，表现为「整页 UNKNOWN 然后空转」。
-            // 每轮先确认还在直播间，不在就按一次返回把它关掉。
-            ensureLiveRoom(ctx)
+            // 每轮先确认「还在抖音的直播间里」，做不到就尽力恢复：
+            // 人为切换直播间（转场期间读不到直播间特征）会耐心等新房间，
+            // 退出抖音会被自动拉回，真的恢复不了才中止。
+            // 早期这里是「一 UNKNOWN 就按返回」，结果把用户刚切到的直播间退掉了。
+            if (!LiveGuard.ensureOnAir(ctx)) {
+                val detection = ctx.detector.detect()
+                throw FlowAbortException(
+                    "已经不在直播间，且自动恢复失败。" +
+                        "当前页面判定 ${detection.page.name}（${detection.score}/${detection.threshold}），" +
+                        "前台${if (ctx.actions.isDouyinForeground()) "是抖音但不在直播间" else "已不是抖音"}。" +
+                        "请打开抖音并停在目标直播间后重新开始"
+                )
+            }
 
             // 追最新：等「列表底部那一行」换人，说明列表已经滚到了比上一轮更新的评论。
             // **不能用滑动去滚**——实测在评论区里做 550px 纵向滑动会直接切到下一个直播间
@@ -107,33 +117,52 @@ class FollowFromLiveFlow : Flow {
             val candidates = collectCandidates(ctx, targets, store, handled)
             if (candidates.isEmpty()) {
                 dryRounds++
-                ctx.publish(message = "评论里暂时没有新面孔，等新评论进来（$dryRounds/$MAX_DRY_ROUNDS）")
-                if (dryRounds >= MAX_DRY_ROUNDS) {
+                // 两种「没候选」完全不同，不能用同一个上限：
+                // - 屏幕上**读得到评论行**，但行里的人全在本轮已处理名单里 → 只是这一屏的人挑完了，
+                //   应该耐心等新评论进来（安静房间等一两分钟是常态）；
+                // - 屏幕上**一行评论都读不到** → 定位失效或被浮层盖住，等下去没有意义。
+                val hasCommentRows = newestRow(ctx, targets) != null
+                val limit = if (hasCommentRows) MAX_IDLE_ROUNDS else MAX_DRY_ROUNDS
+                val hint = if (hasCommentRows) {
+                    "这一屏 ${handled.size} 人都已处理过，等新评论进来"
+                } else {
+                    "读不到评论行"
+                }
+                ctx.publish(message = "$hint（$dryRounds/$limit）")
+                if (dryRounds >= limit) {
                     // 带上当前页面判定再报错，否则「采不到评论」这一个现象会指向两种完全不同的原因
                     val detection = ctx.detector.detect()
                     throw FlowAbortException(
-                        "连续 $MAX_DRY_ROUNDS 次采集不到可关注的评论用户，已停止。" +
-                            "当前页面判定 ${detection.page.name}（${detection.score}/${detection.threshold}）。" +
-                            if (detection.page == PageState.LIVE_ROOM) {
-                                "人在直播间但读不到评论，多半是 live_comment_nickname / live_comment_line " +
-                                    "与当前抖音版本不匹配（见 docs/定位配置说明.md），也可能是这个直播间没人说话"
-                            } else {
-                                "已不在直播间（可能被误退出或被弹窗盖住），请重新进入目标直播间再开始"
-                            }
+                        if (hasCommentRows) {
+                            "连续 $limit 轮都没有出现没关注过的新观众（这个直播间说话的人太少）。" +
+                                "可以换一个更热闹的直播间，或降低目标数量后重试。"
+                        } else {
+                            "连续 $limit 次读不到直播间评论，已停止。" +
+                                "当前页面判定 ${detection.page.name}（${detection.score}/${detection.threshold}）。" +
+                                if (detection.page == PageState.LIVE_ROOM) {
+                                    "人在直播间但读不到评论，多半是 live_comment_nickname / live_comment_line " +
+                                        "与当前抖音版本不匹配（见 docs/定位配置说明.md）"
+                                } else {
+                                    "已不在直播间（可能被弹窗盖住），请重新进入目标直播间再开始"
+                                }
+                        }
                     )
                 }
                 // 刻意**不滑动**：抖音直播间里全屏上下滑是切换直播间，不是滚动评论列表，
-                // 一滑就可能离开你选的直播间。直播评论本身在持续刷新，等着就行。
+                // 一滑就可能离开你选的直播间（四组真机实验，见 docs/M2-直播间评论关注.md §12.2）。
+                // 直播评论本身在持续刷新，等着就行。
                 ctx.settle(COMMENT_WAIT_MS)
                 continue
             }
             dryRounds = 0
 
-            if (!ctx.actions.isDouyinForeground()) {
-                throw FlowAbortException("已经不在抖音前台（可能误退出了直播间），已停止")
+            // 采集到候选说明刚才还在直播间；真正点下去之前再确认一次前台还在抖音。
+            // 用户可能刚好切走（回消息、被来电打断），那时坐标会落在别的应用上。
+            if (!LiveGuard.ensureDouyinForeground(ctx)) {
+                throw FlowAbortException("抖音已不在前台，且自动拉回失败，已停止（不会盲点）")
             }
 
-            // 只在**最新的几个人**里随机挑，不再对整屏候选随机。
+            // 只在**最新的几个人**里挑，不再对整屏候选随机。
             //
             // 之前是对全部候选 random()，屏幕上一屏能挂 9 条评论（实测 y 1195~2170，
             // 覆盖好几分钟），关注完第一个之后经常又从几分钟前的旧评论里挑人，
@@ -142,14 +171,18 @@ class FollowFromLiveFlow : Flow {
             // 若最新的几个都已关注过（被过滤掉了），列表自然往后顺延，不会卡住。
             val window =
                 if (candidates.size > NEWEST_WINDOW) candidates.subList(0, NEWEST_WINDOW) else candidates
-            val pick = window.random()
+            // 加权而不是等概率：最新那一行权 3、第二 2、第三 1。
+            // 用户要的是「刚说话的人」，等概率三选一有 2/3 概率挑到不是最新的那个，观感就是「又在挑老的」；
+            // 但也不能写死「永远挑最底那条」——那是很明显的机器特征。权重随机两头都照顾到。
+            val pick = pickWeighted(window)
             val nickname = pick.name
             handled += nickname
             ctx.publish(message = "挑中「$nickname」")
             LogStore.i(
                 TAG,
                 "候选 ${candidates.size} 人（最新窗口 ${window.size} 人：" +
-                    window.joinToString("、") { it.name } + "），随机挑中「$nickname」"
+                    window.joinToString("、") { "${it.name}@y${it.bottomY}" } +
+                    "），挑中「$nickname」（y=${pick.bottomY}）"
             )
 
             // 优先复用采集时那个节点（省掉一次整树回查），失效了才按昵称回查。
@@ -324,6 +357,27 @@ class FollowFromLiveFlow : Flow {
     )
 
     /**
+     * 在「最新窗口」里按位置加权挑一个：越新权重越高（3 / 2 / 1）。
+     *
+     * 为什么不是 `random()`：三选一等概率会让 2/3 的轮次挑到不是最新的那个，
+     * 用户看到的就是「又在关注老观众」。为什么也不是 `first()`：
+     * 永远挑最底那一行是最容易被识别的机器特征。
+     */
+    private fun pickWeighted(window: List<Candidate>): Candidate {
+        val weights = window.indices.map { NEWEST_WINDOW - it }.map { it.coerceAtLeast(1) }
+        val total = weights.sum()
+        var ticket = ctxRandom().nextInt(total)
+        for (i in weights.indices) {
+            ticket -= weights[i]
+            if (ticket < 0) return window[i]
+        }
+        return window.first()
+    }
+
+    /** 本流程所有随机都走同一份种子源，便于统一做「抖动」级别的拟人化 */
+    private fun ctxRandom(): kotlin.random.Random = Random.Default
+
+    /**
      * 把「挑中的候选人」变成「现在能点的节点」。
      *
      * 1. 先验采集时那个节点还能不能用（refresh + 仍在屏上 + 标签没被 RecyclerView 复用换人）；
@@ -341,38 +395,6 @@ class FollowFromLiveFlow : Flow {
             LogStore.d(TAG, "采集节点已失效/已被复用，按昵称回查「${cand.name}」")
         }
         return ctx.actions.find(Target(Target.Kind.TEXT_CONTAINS, cand.name))
-    }
-
-    /**
-     * 确认当前确实在直播间；被浮层盖住就按一次返回尝试关掉最上面一层。
-     *
-     * 两条保护（M3 实测补上）：
-     * 1. **一次 UNKNOWN 不算数**：收键盘/窗口切换的中间态会让某一刻读不到应用窗口，
-     *    单次误判就按返回会把好好的直播间退掉；
-     * 2. **前台不是抖音就绝不按返回**，否则退的是别的应用。
-     *
-     * 确认不在之后只按一次，不做循环：真的退出直播间时反复返回会把抖音一层层退到底，
-     * 反而更难恢复。剩下的交给 dryRounds 中止。
-     *
-     * @return 恢复后是否在直播间
-     */
-    private suspend fun ensureLiveRoom(ctx: FlowContext): Boolean {
-        repeat(CONFIRM_CHECKS) { i ->
-            ctx.actions.invalidateSnapshot()
-            if (ctx.detector.detect().page == PageState.LIVE_ROOM) return true
-            if (i < CONFIRM_CHECKS - 1) delay(RECHECK_MS)
-        }
-
-        if (!ctx.actions.isDouyinForeground()) {
-            LogStore.w(TAG, "连续 $CONFIRM_CHECKS 次读不到直播间，且前台不是抖音——不按返回")
-            return false
-        }
-
-        LogStore.w(TAG, "连续 $CONFIRM_CHECKS 次不在直播间，按一次返回尝试关掉浮层")
-        ctx.actions.back()
-        ctx.settle(RECOVER_SETTLE_MS)
-        ctx.actions.invalidateSnapshot()
-        return ctx.detector.detect().page == PageState.LIVE_ROOM
     }
 
     /**
@@ -424,6 +446,7 @@ class FollowFromLiveFlow : Flow {
         val limit = rowBottomLimit(ctx, targets)
         val best = LinkedHashMap<String, Candidate>(raw.size)
         var skippedLow = 0
+        var skippedThin = 0
         for ((rawName, node) in raw) {
             val name = rawName.trim()
             when {
@@ -432,7 +455,14 @@ class FollowFromLiveFlow : Flow {
                 name in handled -> continue
                 store.isFollowed(name) -> continue
             }
-            val bottom = ctx.actions.boundsOf(node).bottom
+            val bounds = ctx.actions.boundsOf(node)
+            val bottom = bounds.bottom
+            // 刚插入的行高度还没稳定（实测出现过 6px 的行），点下去落点会偏到相邻行或空白。
+            // 这种行不猜权重，直接等下一轮——它下一轮就是正常高度了。
+            if (bounds.height() < MIN_ROW_HEIGHT) {
+                skippedThin++
+                continue
+            }
             // 压到输入栏上的行不点：追最新之后挑中的就是最底部那几行，点歪会弹键盘
             if (bottom > limit) {
                 skippedLow++
@@ -454,7 +484,7 @@ class FollowFromLiveFlow : Flow {
                 TAG,
                 "采集（$source）：原始 ${raw.size} 条 → 可用 ${filtered.size} 人" +
                     "（已排除：本轮已处理 ${handled.size}、历史已关注 ${store.knownCount()}、" +
-                    "黑名单 ${ctx.config.excludeNicknames.size}、压输入栏 $skippedLow）" +
+                    "黑名单 ${ctx.config.excludeNicknames.size}、压输入栏 $skippedLow、行未成型 $skippedThin）" +
                     "；最新 3 人 ${filtered.take(3).joinToString("、") { "${it.name}@y${it.bottomY}" }}"
             )
         }
@@ -633,7 +663,17 @@ class FollowFromLiveFlow : Flow {
 
         const val MAX_COLLECT = 12
         const val MAX_BUTTON_SCAN = 8
+
+        /** 一行评论都读不到时的容忍轮数（定位失效 / 被浮层盖住，等下去没意义） */
         const val MAX_DRY_ROUNDS = 4
+
+        /**
+         * 读得到评论、但这一屏的人都处理过时的容忍轮数。
+         *
+         * 比 [MAX_DRY_ROUNDS] 宽得多是有意的：冷清直播间几十秒才有人说话是常态，
+         * 用 4 轮（约 30 秒）就中止会让用户误以为「脚本老是自己停」。
+         */
+        const val MAX_IDLE_ROUNDS = 12
         const val MIN_GAP_MS = 600L
         const val MAX_GAP_MS = 15_000L
 
@@ -657,6 +697,15 @@ class FollowFromLiveFlow : Flow {
         /** 评论行下边界 = 输入栏顶 - 这个余量（实测最新一行底部 2170、输入栏顶 2188） */
         const val ROW_LIMIT_MARGIN = 8
 
+        /**
+         * 可点评论行的最小高度。
+         *
+         * 评论自下往上插入时会有一段高度展开动画，实测读到过只有 6px 的行
+         * （`行=[36,2164][780,2170]`），点上去落在原地的空白，抖音当成「点空白」什么也不弹，
+         * 白等 6 秒超时。低于这个高度的行直接跳过，下一轮它就是正常高度。
+         */
+        const val MIN_ROW_HEIGHT = 20
+
         /** 输入栏位置在一轮里不会变，量它时允许吃几秒前的快照，省一趟全树遍历 */
         const val INPUT_BAR_CACHE_MS = 5_000L
 
@@ -667,12 +716,7 @@ class FollowFromLiveFlow : Flow {
         const val COMMENT_WAIT_MS = 2_500L
         const val CLOSE_SETTLE_MS = 500L
 
-        /** 关掉意外弹出的浮层后，等界面稳定再重新判定 */
-        const val RECOVER_SETTLE_MS = 900L
-
-        /** 判「不在直播间」要连续确认几次；一次不算数（收键盘等中间态会读到空窗口） */
-        const val CONFIRM_CHECKS = 2
-        const val RECHECK_MS = 500L
+        /** 关掉意外弹出的浮层后，等界面稳定再重新判定（M2/M3 的驻留判定已收敛进 LiveGuard） */
         const val CARD_TIMEOUT_MS = 6_000L
         /**
          * 等「取消关注」出现的窗口。

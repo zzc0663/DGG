@@ -50,6 +50,20 @@ class FollowedStore private constructor(private val prefs: SharedPreferences) {
         return next
     }
 
+    /**
+     * 手动把「今日关注」清零（悬浮面板上的「重置」）。
+     *
+     * 只清当日计数，**不动已关注名单**：名单是去重用的，清了会让脚本回头重复关注同一批人，
+     * 那是最典型的机器行为特征。用户想重置的永远是「今天还能关注多少个」这个额度。
+     */
+    @Synchronized
+    fun resetToday() {
+        prefs.edit()
+            .putString(KEY_DAY, today())
+            .putInt(KEY_DAY_COUNT, 0)
+            .apply()
+    }
+
     private fun rolloverIfNeeded() {
         if (prefs.getString(KEY_DAY, null) != today()) {
             prefs.edit().putString(KEY_DAY, today()).putInt(KEY_DAY_COUNT, 0).apply()
