@@ -68,7 +68,16 @@ data class LocatorConfig(
 
             val targets = LinkedHashMap<String, Target>()
             targetsJson.keys().forEach { name ->
-                val obj = targetsJson.getJSONObject(name)
+                // 以 `_` 开头的是给人看的注释字段，值可以是任意类型，必须原样跳过。
+                // 曾经这里无条件 getJSONObject()，配置里多写一行注释就抛异常，
+                // 整份配置被丢弃、降级成只有 HOME/SEARCH_RESULT 的内置配置——
+                // 于是 follow_button 消失，M2 一启动就终止。注释不该有这种杀伤力。
+                if (name.startsWith("_")) return@forEach
+                val obj = targetsJson.optJSONObject(name)
+                if (obj == null) {
+                    LogStore.w(TAG, "targets.$name 不是对象，已跳过")
+                    return@forEach
+                }
                 val target = parseTarget(obj)
                 if (target == null) {
                     LogStore.w(TAG, "targets.$name 类型非法，已跳过")
@@ -79,7 +88,12 @@ data class LocatorConfig(
 
             val pages = LinkedHashMap<String, PageRule>()
             pagesJson.keys().forEach { name ->
-                val obj = pagesJson.getJSONObject(name)
+                if (name.startsWith("_")) return@forEach
+                val obj = pagesJson.optJSONObject(name)
+                if (obj == null) {
+                    LogStore.w(TAG, "pages.$name 不是对象，已跳过")
+                    return@forEach
+                }
                 val featuresJson = obj.optJSONArray("features")
                 if (featuresJson == null || featuresJson.length() == 0) {
                     LogStore.w(TAG, "pages.$name 无 features，已跳过")

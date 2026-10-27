@@ -3,6 +3,7 @@ package com.example.dgg.util
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.example.dgg.data.LogStore
 import java.io.File
 
@@ -23,9 +24,9 @@ object NodeDumper {
 
     /** @return 写入的节点数；-1 表示拿不到活动窗口（多半是无障碍没连上或当前窗口不可读） */
     fun dump(service: AccessibilityService, file: File): Int {
-        val root = service.rootInActiveWindow
+        val root = pickRoot(service)
         if (root == null) {
-            LogStore.e(TAG, "rootInActiveWindow 为空：无障碍未连接，或当前窗口来自其他用户空间/安全窗口")
+            LogStore.e(TAG, "拿不到窗口根节点：无障碍未连接，或当前窗口来自其他用户空间/安全窗口")
             return -1
         }
 
@@ -70,6 +71,37 @@ object NodeDumper {
             LogStore.e(TAG, "写文件失败：${it.message}")
             -1
         }
+    }
+
+    /**
+     * 选哪个窗口来转储。
+     *
+     * 不能直接用 `rootInActiveWindow`：实测在抖音全屏播放时它会把**后台应用残留的
+     * Dialog 窗口**当成活动窗口返回（截图里明明只有抖音推荐流），于是校准拿到的
+     * 是一棵毫不相干的节点树，还会让人误以为「抖音页面里没这些控件」。
+     *
+     * 改为在 `service.windows` 里挑**面积最大的应用窗口**：前台全屏应用必然胜出，
+     * 悬浮窗（TYPE_ACCESSIBILITY_OVERLAY / TYPE_APPLICATION_OVERLAY）和 Dialog 都不会抢到。
+     * 拿不到窗口列表时才退回 `rootInActiveWindow`。
+     */
+    private fun pickRoot(service: AccessibilityService): AccessibilityNodeInfo? {
+        val windows = runCatching { service.windows }.getOrNull()
+        if (!windows.isNullOrEmpty()) {
+            var best: AccessibilityWindowInfo? = null
+            var bestArea = -1
+            for (w in windows) {
+                if (w.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
+                val r = Rect()
+                w.getBoundsInScreen(r)
+                val area = r.width() * r.height()
+                if (area > bestArea) {
+                    bestArea = area
+                    best = w
+                }
+            }
+            best?.root?.let { return it }
+        }
+        return service.rootInActiveWindow
     }
 
     private fun esc(cs: CharSequence?): String {
