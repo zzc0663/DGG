@@ -56,7 +56,17 @@ class FollowFromLiveFlow : Flow {
         var followed = 0
         var dryRounds = 0
         var reusedHits = 0
+        var waitedRounds = 0
         val handled = HashSet<String>()
+
+        /**
+         * 上一轮评论区**最底那一行**的文案（= 当时最新的一条评论）。
+         *
+         * 直播间评论是自下往上堆的，所以「列表有没有推进到最新」只能靠「底行有没有换人」判断。
+         * 这是本轮新增的「追最新」锚点：每关注一个人要花 6 秒以上（点开资料卡 → 点关注 → 校验），
+         * 回来时列表很可能还停在刚才那一屏，不追就会一直从几分钟前的旧评论里挑人。
+         */
+        var anchor: String? = null
 
         while (followed < target) {
             if (ctx.stopped()) return
@@ -67,6 +77,32 @@ class FollowFromLiveFlow : Flow {
             // 一旦盖上，后面所有采集都是在浮层上做的，表现为「整页 UNKNOWN 然后空转」。
             // 每轮先确认还在直播间，不在就按一次返回把它关掉。
             ensureLiveRoom(ctx)
+
+            // 追最新：等「列表底部那一行」换人，说明列表已经滚到了比上一轮更新的评论。
+            // **不能用滑动去滚**——实测在评论区里做 550px 纵向滑动会直接切到下一个直播间
+            // （主播从「毛里求斯黑猩猩」变成「迅猛龙特…」），短滑又不产生任何位移：
+            // 这套列表不可滚动，只能等它自己往上滚。
+            val latest = if (anchor != null) {
+                awaitNewestChanged(ctx, targets, anchor, WAIT_NEW_COMMENT_MS)
+            } else {
+                null
+            }
+            if (latest != null) {
+                if (latest != anchor) {
+                    waitedRounds++
+                    LogStore.d(TAG, "评论区已推进到新评论，按最新一屏采集")
+                } else {
+                    LogStore.w(
+                        TAG,
+                        "评论区 ${WAIT_NEW_COMMENT_MS}ms 内没有新评论（房间可能很安静），" +
+                            "退化为「当前屏最新处」取人"
+                    )
+                }
+                // 点击前把此刻的最新一行记为下一轮的基准（省掉一次多余的遍历）
+                anchor = latest
+            } else {
+                anchor = newestRow(ctx, targets)?.label
+            }
 
             val candidates = collectCandidates(ctx, targets, store, handled)
             if (candidates.isEmpty()) {
@@ -97,12 +133,24 @@ class FollowFromLiveFlow : Flow {
                 throw FlowAbortException("已经不在抖音前台（可能误退出了直播间），已停止")
             }
 
-            // 随机挑，不按评论顺序从上往下点——顺序点是最容易被识别的机器特征
-            val pick = candidates.random()
+            // 只在**最新的几个人**里随机挑，不再对整屏候选随机。
+            //
+            // 之前是对全部候选 random()，屏幕上一屏能挂 9 条评论（实测 y 1195~2170，
+            // 覆盖好几分钟），关注完第一个之后经常又从几分钟前的旧评论里挑人，
+            // 观感就是「一直在补关注早就不在看的人」。
+            // candidates 已按「新→旧」排好序，前 NEWEST_WINDOW 个就是屏幕上最新的可用人；
+            // 若最新的几个都已关注过（被过滤掉了），列表自然往后顺延，不会卡住。
+            val window =
+                if (candidates.size > NEWEST_WINDOW) candidates.subList(0, NEWEST_WINDOW) else candidates
+            val pick = window.random()
             val nickname = pick.name
             handled += nickname
             ctx.publish(message = "挑中「$nickname」")
-            LogStore.i(TAG, "候选 ${candidates.size} 人，随机挑中「$nickname」")
+            LogStore.i(
+                TAG,
+                "候选 ${candidates.size} 人（最新窗口 ${window.size} 人：" +
+                    window.joinToString("、") { it.name } + "），随机挑中「$nickname」"
+            )
 
             // 优先复用采集时那个节点（省掉一次整树回查），失效了才按昵称回查。
             // 必须用 contains：实测评论节点是「昵称：正文」整行，用等值匹配永远命中不了。
@@ -177,13 +225,103 @@ class FollowFromLiveFlow : Flow {
         }
 
         ctx.publish(message = "已达本轮目标 $target")
-        LogStore.i(TAG, "本轮完成：关注 $followed 人，达目标 $target（直接复用采集节点 $reusedHits 次）")
+        LogStore.i(
+            TAG,
+            "本轮完成：关注 $followed 人，达目标 $target" +
+                "（直接复用采集节点 $reusedHits 次，等新评论 $waitedRounds 次）"
+        )
+    }
+
+    // ==================== 追最新 ====================
+
+    /** 评论区里的一行：整行文案 + 屏幕下边缘（y 越大越新） */
+    private class Row(val label: String, val bottom: Int)
+
+    /**
+     * 取当前屏**最底（最新）**的那一行评论。
+     *
+     * 走快照在内存里比对，避免为了一个问题再跑一趟全树遍历。
+     * 这里刻意不套用任何业务过滤（已关注/黑名单），因为它的用途是「判断列表有没有动」，
+     * 锚点必须是屏幕上真实的最底一行，而不是「最底一个还没关注的人」。
+     */
+    private fun newestRow(ctx: FlowContext, targets: LiveTargets): Row? {
+        val target = targets.nickname ?: targets.line ?: return null
+        // ttl = 0：要的是「此刻」的界面，不能吃缓存
+        val facts = ctx.actions.snapshot(ttlMs = 0)
+        var best: Row? = null
+        for (f in facts) {
+            if (!ctx.actions.matchesFacts(f, target)) continue
+            val label = (f.text ?: f.desc)?.trim() ?: continue
+            if (label.isEmpty()) continue
+            val current = best
+            if (current == null || f.bottom > current.bottom) best = Row(label, f.bottom)
+        }
+        return best
+    }
+
+    /**
+     * 等评论区「滚到最新」。
+     *
+     * 判据是**最底那一行换人**：列表满屏时每行的 y 是固定的（旧行被顶掉、新行补在底部），
+     * 所以「y 变大」不是有效信号；而每一行的文案包含评论正文，换人必然换文案。
+     *
+     * @return 退出时看到的最新一行文案（null = 一直读不到评论行）；
+     *         与传入的 [anchor] 不同即代表列表已推进，相同代表超时未推进
+     */
+    private suspend fun awaitNewestChanged(
+        ctx: FlowContext,
+        targets: LiveTargets,
+        anchor: String,
+        timeoutMs: Long
+    ): String? {
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        var last: String? = null
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (ctx.stopped()) return last
+            val newest = newestRow(ctx, targets)
+            if (newest != null) {
+                last = newest.label
+                if (newest.label != anchor) {
+                    LogStore.d(
+                        TAG,
+                        "评论区底行已换：「${anchor.take(18)}」→「${newest.label.take(18)}」"
+                    )
+                    return last
+                }
+            }
+            delay(NEW_COMMENT_POLL_MS)
+        }
+        return last
+    }
+
+    /**
+     * 评论行可点的下边界：输入栏顶再往上留一点。
+     *
+     * 实测 40.8.0：输入框 `[72,2188][480,2302]`，最新一行评论底部约 2170。
+     * 追最新之后挑中的就是最底部那几行，离输入栏只有十几像素，
+     * 不设这条线的话点歪了会直接弹键盘（把输入区当成评论行点）。
+     *
+     * 走快照而不是 `find`：输入栏的位置在一轮里不会变，没必要为它再跑一趟全树遍历。
+     */
+    private fun rowBottomLimit(ctx: FlowContext, targets: LiveTargets): Int {
+        val input = targets.input
+        if (input != null) {
+            val tops = ctx.actions.snapshot(ttlMs = INPUT_BAR_CACHE_MS)
+                .filter { ctx.actions.matchesFacts(it, input) && it.top > 0 }
+                .map { it.top }
+            if (tops.isNotEmpty()) return tops.min() - ROW_LIMIT_MARGIN
+        }
+        return (ctx.actions.screenHeight() * FALLBACK_ROW_LIMIT_RATIO).toInt()
     }
 
     // ==================== 候选采集 ====================
 
-    /** 一个候选人：昵称 + 采集时那个节点（为 null 表示只能靠回查） */
-    private class Candidate(val name: String, val node: AccessibilityNodeInfo?)
+    /** 一个候选人：昵称 + 采集时那个节点（为 null 表示只能靠回查）+ 所在行的下边缘（y 越大越新） */
+    private class Candidate(
+        val name: String,
+        val node: AccessibilityNodeInfo?,
+        val bottomY: Int
+    )
 
     /**
      * 把「挑中的候选人」变成「现在能点的节点」。
@@ -283,20 +421,31 @@ class FollowFromLiveFlow : Flow {
                 }
         }
 
-        val filtered = ArrayList<Candidate>(raw.size)
-        val seen = HashSet<String>(raw.size)
+        val limit = rowBottomLimit(ctx, targets)
+        val best = LinkedHashMap<String, Candidate>(raw.size)
+        var skippedLow = 0
         for ((rawName, node) in raw) {
             val name = rawName.trim()
             when {
-                !isValidNickname(name) -> {}
-                name in ctx.config.excludeNicknames -> {}
-                name in handled -> {}
-                store.isFollowed(name) -> {}
-                // 同一个人连发几条评论时，只留第一条对应的节点
-                !seen.add(name) -> {}
-                else -> filtered += Candidate(name, node)
+                !isValidNickname(name) -> continue
+                name in ctx.config.excludeNicknames -> continue
+                name in handled -> continue
+                store.isFollowed(name) -> continue
+            }
+            val bottom = ctx.actions.boundsOf(node).bottom
+            // 压到输入栏上的行不点：追最新之后挑中的就是最底部那几行，点歪会弹键盘
+            if (bottom > limit) {
+                skippedLow++
+                continue
+            }
+            // 同一个人连发几条评论时保留**最新**那一条（bottom 最大），不是第一次出现的那条
+            val existing = best[name]
+            if (existing == null || bottom > existing.bottomY) {
+                best[name] = Candidate(name, node, bottom)
             }
         }
+        // 从新到旧：调用方只取最前面几个，就能保证挑的是屏幕上最新的评论者
+        val filtered = best.values.sortedByDescending { it.bottomY }
 
         if (raw.isEmpty()) {
             LogStore.w(TAG, "本轮未采集到任何评论文本（来源：$source），可能是定位配置不匹配或评论区为空")
@@ -305,7 +454,8 @@ class FollowFromLiveFlow : Flow {
                 TAG,
                 "采集（$source）：原始 ${raw.size} 条 → 可用 ${filtered.size} 人" +
                     "（已排除：本轮已处理 ${handled.size}、历史已关注 ${store.knownCount()}、" +
-                    "黑名单 ${ctx.config.excludeNicknames.size}）"
+                    "黑名单 ${ctx.config.excludeNicknames.size}、压输入栏 $skippedLow）" +
+                    "；最新 3 人 ${filtered.take(3).joinToString("、") { "${it.name}@y${it.bottomY}" }}"
             )
         }
         return filtered
@@ -339,7 +489,7 @@ class FollowFromLiveFlow : Flow {
         var triedProfileEntry = false
         while (SystemClock.uptimeMillis() < deadline) {
             if (ctx.stopped()) return CardProbe(CardState.UNKNOWN)
-            findFollowedButton(ctx, targets)?.let { return CardProbe(CardState.ALREADY_FOLLOWED, it) }
+            if (isAlreadyFollowed(ctx, targets)) return CardProbe(CardState.ALREADY_FOLLOWED)
             findCardButton(ctx, targets.follow)?.let { return CardProbe(CardState.FOLLOWABLE, it) }
 
             if (!triedProfileEntry) {
@@ -348,7 +498,9 @@ class FollowFromLiveFlow : Flow {
                     triedProfileEntry = true
                     LogStore.i(TAG, "点评论后出现的是快捷操作栏，改点「$PROFILE_ENTRY_TEXT」进资料卡")
                     ctx.actions.tapNode(entry, PROFILE_ENTRY_TEXT)
-                    delay(CARD_POLL_MS * 2)
+                    // 资料卡是滑入动画，~500ms 时按钮还在移动：这时读到的 bounds 拿去点会点空，
+                    // 表现为「点了关注但状态没变」（实测一次：3s 校验失败、界面其实已经关注成功）。
+                    delay(CARD_ENTRY_SETTLE_MS)
                     continue
                 }
             }
@@ -361,7 +513,7 @@ class FollowFromLiveFlow : Flow {
         val deadline = SystemClock.uptimeMillis() + timeoutMs
         while (SystemClock.uptimeMillis() < deadline) {
             if (ctx.stopped()) return false
-            if (findFollowedButton(ctx, targets) != null) return true
+            if (isAlreadyFollowed(ctx, targets)) return true
             delay(CARD_POLL_MS)
         }
         return false
@@ -393,7 +545,7 @@ class FollowFromLiveFlow : Flow {
     }
 
     /**
-     * 找「已经是关注状态」的证据。
+     * 判断「当前弹层里的按钮已经是关注状态」。
      *
      * 配置里的 `followed_button` 是主判据（40.8 实测为「取消关注」），
      * 但抖音还有第三种态：对方也关注了你，按钮显示「互相关注」——
@@ -403,13 +555,19 @@ class FollowFromLiveFlow : Flow {
      * 在已关注后仍然存在于节点树上，如果这里漏判，就会走到 FOLLOWABLE 分支去点
      * 「关注按钮」，而那个坐标正好落在「取消关注」上——把已经关注的人取关。
      * 所以宁可多重判一次已关注，也不能漏。
+     *
+     * **走快照而不是逐个文案 collect**：这里原来对 3 个文案各跑一趟全树遍历（1.4s/趟），
+     * 一次判断要 4 秒多，而校验窗口只有 3 秒——经常一次都没采到就判「没变成已关注」，
+     * 实测表现为「界面明明弹出关注成功，进度却不涨」。现在一趟遍历 + 内存比对。
      */
-    private fun findFollowedButton(ctx: FlowContext, targets: LiveTargets): AccessibilityNodeInfo? {
-        findCardButton(ctx, targets.followed)?.let { return it }
-        for (text in ALREADY_FOLLOWED_TEXTS) {
-            findCardButton(ctx, Target(Target.Kind.TEXT, text))?.let { return it }
+    private fun isAlreadyFollowed(ctx: FlowContext, targets: LiveTargets): Boolean {
+        val topLimit = (ctx.actions.screenHeight() * TOP_EXCLUDE_RATIO).toInt()
+        val labels = ALREADY_FOLLOWED_TEXTS + targets.followed.value
+        // ttl = 0：校验期间必须读「此刻」的界面，不能吃 700ms 缓存
+        return ctx.actions.snapshot(ttlMs = 0).any { fact ->
+            val text = fact.text?.trim()
+            !text.isNullOrEmpty() && fact.bottom > topLimit && labels.contains(text)
         }
-        return null
     }
 
     // ==================== 收尾 ====================
@@ -426,7 +584,7 @@ class FollowFromLiveFlow : Flow {
      */
     private suspend fun closeCard(ctx: FlowContext, targets: LiveTargets) {
         val stillOpen = findCardButton(ctx, targets.follow) != null ||
-            findFollowedButton(ctx, targets) != null
+            isAlreadyFollowed(ctx, targets)
         if (!stillOpen) {
             LogStore.d(TAG, "弹层已不在，跳过关闭动作")
             return
@@ -442,7 +600,9 @@ class FollowFromLiveFlow : Flow {
         val nickname: Target?,
         val line: Target?,
         val follow: Target,
-        val followed: Target
+        val followed: Target,
+        /** 评论输入区，用来量出「评论行的下边界」，避免点评论时点到输入框 */
+        val input: Target?
     ) {
         companion object {
             fun from(config: LocatorConfig): LiveTargets {
@@ -461,7 +621,8 @@ class FollowFromLiveFlow : Flow {
                     nickname = nickname,
                     line = line,
                     follow = follow,
-                    followed = followed
+                    followed = followed,
+                    input = config.target("comment_input")
                 )
             }
         }
@@ -476,6 +637,32 @@ class FollowFromLiveFlow : Flow {
         const val MIN_GAP_MS = 600L
         const val MAX_GAP_MS = 15_000L
 
+        /**
+         * 只在最新的这么多个**可用**候选里随机挑人。
+         *
+         * 一屏能挂 9 条评论（实测 y 1195~2170，覆盖好几分钟），整屏随机会让后半程
+         * 一直在补关注几分钟前的人。取 3 既保证「挑的是刚说话的」，也保留随机性。
+         */
+        const val NEWEST_WINDOW = 3
+
+        /**
+         * 等「评论区底部换行」的超时。
+         *
+         * 热闹的直播间 1 秒内就会有新评论，等待几乎不花时间；
+         * 冷清房间没人说话时不该一直干等，6 秒后降级为「当前屏最新处」取人。
+         */
+        const val WAIT_NEW_COMMENT_MS = 6_000L
+        const val NEW_COMMENT_POLL_MS = 300L
+
+        /** 评论行下边界 = 输入栏顶 - 这个余量（实测最新一行底部 2170、输入栏顶 2188） */
+        const val ROW_LIMIT_MARGIN = 8
+
+        /** 输入栏位置在一轮里不会变，量它时允许吃几秒前的快照，省一趟全树遍历 */
+        const val INPUT_BAR_CACHE_MS = 5_000L
+
+        /** 拿不到输入栏位置时按屏高比例兜底（实测输入栏顶 ≈ 屏高 91%） */
+        const val FALLBACK_ROW_LIMIT_RATIO = 0.92
+
         const val TAP_SETTLE_MS = 600L
         const val COMMENT_WAIT_MS = 2_500L
         const val CLOSE_SETTLE_MS = 500L
@@ -487,8 +674,17 @@ class FollowFromLiveFlow : Flow {
         const val CONFIRM_CHECKS = 2
         const val RECHECK_MS = 500L
         const val CARD_TIMEOUT_MS = 6_000L
-        const val VERIFY_TIMEOUT_MS = 3_000L
+        /**
+         * 等「取消关注」出现的窗口。
+         *
+         * 一次快照遍历约 1.4s，3s 只有两次采样，而实测按钮状态刷新常常要 1.5~4s，
+         * 于是出现「画面弹出关注成功、进度却不涨」的假失败。放宽到 6s（采样 4 次）。
+         */
+        const val VERIFY_TIMEOUT_MS = 6_000L
         const val CARD_POLL_MS = 250L
+
+        /** 点「资料卡」后等卡片滑入动画结束，避免拿动画中的 bounds 去点关注 */
+        const val CARD_ENTRY_SETTLE_MS = 900L
 
         /**
          * 等抖音切到前台的初始等待。

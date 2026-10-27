@@ -72,7 +72,17 @@ class Actions(
         val text: String?,
         val desc: String?,
         val id: String?,
-        val editable: Boolean
+        val editable: Boolean,
+        /**
+         * 屏幕坐标里的**下边缘**。
+         *
+         * 直播评论是自下往上堆的（最新一条恒在列表底部），所以「谁是最新的一条」
+         * 只能靠 y 判断：bottom 越大越新。业务流程用它排序/找最新一行，
+         * 不再为这个信息额外跑一趟遍历。
+         */
+        val bottom: Int = 0,
+        /** 屏幕坐标里的**上边缘**，用于量「评论行不能压过输入栏」这类边界 */
+        val top: Int = 0
     )
 
     private var snapshotCache: Snapshot? = null
@@ -104,13 +114,17 @@ class Actions(
         while (queue.isNotEmpty() && visited < MAX_NODES) {
             val node = queue.removeFirst()
             visited++
+            // bounds 只取一次：isOnScreen 和 bottom 都要用，重复取就是重复跨进程调用
+            val bounds = boundsOf(node)
             // 屏外节点不参与判定：RecyclerView 滚出屏幕的行仍留在树里，且 bounds 已失效
-            if (isOnScreen(node)) {
+            if (isOnScreen(bounds)) {
                 facts += NodeFacts(
                     text = textOf(node),
                     desc = descOf(node),
                     id = node.viewIdResourceName,
-                    editable = node.isEditable
+                    editable = node.isEditable,
+                    bottom = bounds.bottom,
+                    top = bounds.top
                 )
             }
             for (i in 0 until node.childCount) {
@@ -225,8 +239,9 @@ class Actions(
      *
      * 公开出去是给业务流程用的：它自己留住采集时的节点，点击前要再校验一次可见性。
      */
-    fun isOnScreen(node: AccessibilityNodeInfo): Boolean {
-        val r = boundsOf(node)
+    fun isOnScreen(node: AccessibilityNodeInfo): Boolean = isOnScreen(boundsOf(node))
+
+    private fun isOnScreen(r: Rect): Boolean {
         if (r.width() <= 0 || r.height() <= 0) return false
         return r.bottom > 0 && r.top < screenHeight() && r.right > 0 && r.left < screenWidth()
     }
@@ -638,7 +653,12 @@ class Actions(
          * 出现在控件的 text / content-desc 里就判定为「会花钱」。
          * 「小心心」是实测踩到的：抖音直播间 1 钻付费礼物，长得像点赞按钮。
          */
-        val PAID_HINTS = listOf("小心心", "支付", "充值", "购买", "打赏", "送礼")
+        val PAID_HINTS = listOf(
+            "小心心", "支付", "充值", "购买", "打赏", "送礼",
+            // 礼物面板里的按钮文案是「赠送」，实测选中一个 2999 钻的礼物后只剩这一颗按钮；
+            // 漏掉它等于把「一键送出一个 2999 钻礼物」留在可点范围内。
+            "赠送", "送礼物", "钻", "钱包", "余额"
+        )
 
         /**
          * 快照缓存有效期（ms）。
