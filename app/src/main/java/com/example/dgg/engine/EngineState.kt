@@ -38,6 +38,10 @@ data class EngineProgress(
      * 文案就必须由 Flow 自己声明，不能让通知栏/悬浮窗写死成「已关注」。
      */
     val counterLabel: String = "已关注",
+    /** 养号：累计点赞数（[followed] 在养号流程里装的是「已浏览」） */
+    val liked: Int = 0,
+    /** 养号：累计收藏数 */
+    val collected: Int = 0,
     val consecutiveFailures: Int = 0,
     val message: String = "",
     val updatedAt: Long = 0L
@@ -51,6 +55,8 @@ data class EngineProgress(
             // 没有总量目标的流程（如直播互动）只显示已完成数
             followed > 0 -> append(" · $counterLabel $followed")
         }
+        // 养号才有这两个数：关注/直播流程一直是 0，不该在它们的通知里多出一截
+        if (liked > 0 || collected > 0) append(" · 赞 $liked · 藏 $collected")
         if (message.isNotBlank()) append(" · $message")
     }
 }

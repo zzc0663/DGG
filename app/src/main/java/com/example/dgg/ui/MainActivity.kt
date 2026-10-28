@@ -8,8 +8,10 @@ import android.os.Build
 import android.os.Bundle
 import android.text.InputFilter
 import android.text.InputType
+import android.view.Gravity
 import android.view.View
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -21,6 +23,7 @@ import androidx.core.widget.doAfterTextChanged
 import com.example.dgg.R
 import com.example.dgg.data.LogStore
 import com.example.dgg.data.PermissionGuard
+import com.example.dgg.data.PresetTags
 import com.example.dgg.data.Settings
 import com.example.dgg.data.SettingsStore
 import com.example.dgg.data.license.LicenseProvider
@@ -42,11 +45,13 @@ import com.example.dgg.engine.EngineProgress
 import com.example.dgg.engine.EngineState
 import com.example.dgg.engine.Flow
 import com.example.dgg.engine.LocatorConfigLoader
+import com.example.dgg.engine.NurtureTags
 import com.example.dgg.engine.PageDetector
 import com.example.dgg.engine.SmokeFlow
 import com.example.dgg.engine.TaskEngine
 import com.example.dgg.engine.flow.FollowFromLiveFlow
 import com.example.dgg.engine.flow.LiveInteractFlow
+import com.example.dgg.engine.flow.NurtureFlow
 import com.example.dgg.engine.risk.Humanizer
 import com.example.dgg.service.DebugChannel
 import com.example.dgg.service.OtaService
@@ -115,9 +120,9 @@ class MainActivity : AppCompatActivity() {
     private var progressJob: Job? = null
 
     private val modeDescriptions = listOf(
-        "挂机涨粉：搜索关键词用户，浏览粉丝列表互动涨粉",
-        "垂直养号：按行业关键词持续互动，账号垂直度更高",
-        "首页连播：从推荐流进入直播间，模拟真实浏览"
+        "刷视频养号：自己上下滑推荐流，按随机节奏观看，命中标签时概率点赞（不会涨粉，也不关注任何人）",
+        "垂直养号：按行业关键词持续互动，账号垂直度更高（暂未开放）",
+        "首页连播：只刷视频不做任何互动，最保守的挂时长方式"
     )
 
     private val commentModeDescriptions = listOf(
@@ -402,13 +407,21 @@ class MainActivity : AppCompatActivity() {
     private fun bindNurture(s: Settings) {
         val c = binding.contentNurture
 
-        bindIntField(c.etRunMinutes, s.runMinutes) { v -> store.edit { it.copy(runMinutes = v) } }
+        bindRangedIntField(
+            c.etRunMinutes, s.runMinutes, Settings.RUN_MINUTES_MIN, Settings.RUN_MINUTES_MAX
+        ) { v -> store.edit { it.copy(runMinutes = v) } }
 
         bindSegmented(
             listOf(c.segModeIdle, c.segModeVertical, c.segModeHome), s.nurtureMode, grouped = false
         ) { index ->
             store.edit { it.copy(nurtureMode = index) }
             c.tvModeDesc.text = modeDescriptions.getOrElse(index) { "" }
+        }
+
+        bindSegmented(
+            listOf(c.segPaceSlow, c.segPaceNormal, c.segPaceFast), s.nurturePace, grouped = false
+        ) { index ->
+            store.edit { it.copy(nurturePace = index) }
         }
 
         bindSlider(c.sliderLike, c.tvPctLike, s.probLike) { v -> store.edit { it.copy(probLike = v) } }
@@ -419,6 +432,73 @@ class MainActivity : AppCompatActivity() {
             store.edit { it.copy(probComment = v) }
         }
         bindSlider(c.sliderShare, c.tvPctShare, s.probShare) { v -> store.edit { it.copy(probShare = v) } }
+
+        renderTagSummary(s.nurtureTags)
+        c.tvTagEdit.setOnClickListener { showTagEditor() }
+    }
+
+    /** 「文案标签加权」那一行只显示概况，具体编辑在弹窗里 */
+    private fun renderTagSummary(raw: String) {
+        val parsed = NurtureTags.parse(raw)
+        binding.contentNurture.tvTagSummary.text = when {
+            parsed.rules.isEmpty() -> "文案标签加权（未配置）"
+            else -> "文案标签加权（${parsed.rules.size} 条，最高 +${parsed.rules.maxOf { it.bonusPercent }}%）"
+        }
+    }
+
+    /**
+     * 标签编辑弹窗。
+     *
+     * 第一次打开时预填一份示例（[PresetTags]），但**不会**自动写回设置——
+     * 用户清空标签是明确的意图，下次再打开不该又冒出来。
+     */
+    private fun showTagEditor() {
+        val current = store.current.nurtureTags
+        val seed = current.ifBlank { PresetTags.EXAMPLES }
+
+        val density = resources.displayMetrics.density
+        val input = EditText(this).apply {
+            setText(seed)
+            gravity = Gravity.TOP or Gravity.START
+            minLines = 8
+            maxLines = 14
+            setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14f)
+            hint = "一行一条，例如：健身 / 蛋白粉 80"
+            setPadding((12 * density).toInt(), (10 * density).toInt(), (12 * density).toInt(), (10 * density).toInt())
+            background = ContextCompat.getDrawable(context, R.drawable.bg_input)
+        }
+        val container = FrameLayout(this).apply {
+            setPadding((20 * density).toInt(), (8 * density).toInt(), (20 * density).toInt(), 0)
+            addView(input)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("视频文案标签")
+            .setMessage("命中标签会放大点赞概率：基线 × （1 + 加成）。一行一条，权重可省略（默认 100%）。")
+            .setView(container)
+            .setPositiveButton("保存") { _, _ ->
+                val raw = input.text?.toString().orEmpty()
+                store.edit { it.copy(nurtureTags = raw) }
+                renderTagSummary(raw)
+                val parsed = NurtureTags.parse(raw)
+                val skipped = parsed.invalidLines.size
+                LogStore.i(TAG, "标签已更新：${parsed.rules.size} 条生效，跳过 $skipped 行")
+                toast(
+                    when {
+                        parsed.rules.isEmpty() && raw.isBlank() -> "已清空标签，点赞按基线概率"
+                        parsed.rules.isEmpty() -> "没有可用标签（$skipped 行都没看懂）"
+                        skipped > 0 -> "已保存 ${parsed.rules.size} 条，$skipped 行看不懂已跳过"
+                        else -> "已保存 ${parsed.rules.size} 条标签"
+                    }
+                )
+            }
+            .setNeutralButton("清空") { _, _ ->
+                store.edit { it.copy(nurtureTags = "") }
+                renderTagSummary("")
+                toast("已清空标签")
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun bindLive(s: Settings) {
@@ -943,7 +1023,7 @@ class MainActivity : AppCompatActivity() {
         }
         when (currentTab) {
             TAB_AUTO -> confirmFollow()
-            TAB_NURTURE -> showUnavailable(TAB_NAMES[TAB_NURTURE], "M4")
+            TAB_NURTURE -> confirmNurture()
             TAB_LIVE -> confirmLiveInteract()
         }
     }
@@ -981,6 +1061,47 @@ class MainActivity : AppCompatActivity() {
                     "运行期间屏幕会被自动操作，请勿手动干扰；随时可用悬浮窗或通知栏停止。"
             )
             .setPositiveButton("开始") { _, _ -> startFlow(LiveInteractFlow(), "已启动直播互动") }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 「开始服务」= M4 主业务：主动刷推荐流 + 随机停留 + 文案标签加权点赞 */
+    private fun confirmNurture() {
+        val s = store.current
+        if (s.nurtureMode == Settings.NURTURE_VERTICAL) {
+            toast("「垂直养号」还没开放，请选「刷视频养号」或「首页连播」")
+            return
+        }
+
+        val browseOnly = s.nurtureMode == Settings.NURTURE_HOME
+        val tagCount = NurtureTags.parse(s.nurtureTags).rules.size
+        val pace = when (s.nurturePace) {
+            Settings.PACE_SLOW -> "慢"
+            Settings.PACE_FAST -> "快"
+            else -> "标准"
+        }
+        val minutes = s.runMinutes.coerceIn(Settings.RUN_MINUTES_MIN, Settings.RUN_MINUTES_MAX)
+
+        val interactPart = if (browseOnly) {
+            "这是「首页连播」：只刷视频，不做任何互动。\n\n"
+        } else {
+            "点赞基线 ${s.probLike}%（命中标签时按「基线×(1+加成)」放大，最高 60%），" +
+                "收藏基线 ${s.probCollect}%；当前 ${tagCount} 条文案标签生效。\n\n"
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("开始养号")
+            .setMessage(
+                "开始前请确认：抖音已打开，并停在「能看到右侧点赞按钮的视频画面」。" +
+                    "不在的话脚本会试着点「首页」→「推荐」自己进去，进不去会明确中止，不会瞎猜。\n\n" +
+                    "运行中会：自动上下滑推荐流，每条视频按「$pace」节奏随机停留 1.5~90 秒" +
+                    "（多数 2~12 秒），每 20~40 屏休息一次，偶尔回看、偶尔看一眼评论。\n\n" +
+                    interactPart +
+                    "遇到直播推荐卡、商品卡一律直接滑走，绝不点击。\n\n" +
+                    "⚠ 这个功能不涨粉：它不关注任何人，只把账号养得像个正常活跃用户。" +
+                    "到「运行时长 $minutes 分钟」自动停，随时可用悬浮窗停止。"
+            )
+            .setPositiveButton("开始") { _, _ -> startFlow(NurtureFlow(), "已启动刷视频养号") }
             .setNegativeButton("取消", null)
             .show()
     }

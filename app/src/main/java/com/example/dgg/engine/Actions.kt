@@ -82,8 +82,15 @@ class Actions(
          */
         val bottom: Int = 0,
         /** 屏幕坐标里的**上边缘**，用于量「评论行不能压过输入栏」这类边界 */
-        val top: Int = 0
-    )
+        val top: Int = 0,
+        /** 左边缘。养号靠 x 位置区分「右侧竖排按钮栏」与「左下文案区」，没有它就得再遍历一次 */
+        val left: Int = 0,
+        /** 右边缘，与 [left] 配套 */
+        val right: Int = 0
+    ) {
+        /** 快照里量出来的矩形，点它的时候不必再回表找节点 */
+        fun rect(): Rect = Rect(left, top, right, bottom)
+    }
 
     private var snapshotCache: Snapshot? = null
 
@@ -95,11 +102,38 @@ class Actions(
      * 缓存的安全性靠两点保证：
      * 1. **任何手势之后立刻失效**（见 [invalidateSnapshot]，所有 dispatchBack/dispatchTap/swipe 都会调）；
      * 2. TTL 很短（默认 700ms），小于一个轮询周期——界面上真的冒出风控弹窗，最多晚 0.7 秒被发现。
+     *
+     * @param pruneSubtreeOfDesc 传入一个 desc 值时，**该 desc 命中的节点不再展开子树**。
+     *   专为养号设计：抖音视频页实测 1173 个节点、单次遍历 **12.6 秒**（每节点约 8 次跨进程调用），
+     *   其中绝大多数是 `content-desc="视频"` 那个播放器容器下的贴纸/挂件空节点，养号用不到。
+     *   默认 null = 不剪枝，M2/M3 的老行为完全不变。
+     *
+     *   ⚠️ 刻意**不用「屏幕中央区域」当剪枝条件**：风控弹窗的容器也是「无文本 + 居中」，
+     *   按区域剪会连「操作频繁」这类弹窗一起剪掉，导致风控漏检——那是比慢严重得多的问题。
+     *   按 desc 精确剪则不会误伤：弹窗容器的 desc 不是「视频」。
+     * @param lean 跳过「养号用不上」的字段（id、editable），每节点省 2 次跨进程调用。
+     *   只对信任调用方开启：靠 id 定位的流程（M2/M3 部分路径）不能用 lean。
+     * @param pruneOffscreen **整棵子树都在屏幕外时不再展开**。
+     *   屏幕外的叶子节点本来就不会进 `facts`（[isOnScreen] 已拦），但旧实现仍会把它们的子树
+     *   全部走一遍。抖音视频页的 RecyclerView 会预加载下一条/下 N 条，实测下一条的点赞按钮
+     *   top=3376、文案 top=4244（屏高 2374），还有成片的「券后价 / 已售 1万+件」商品列表，
+     *   这些全在屏幕外却要花十几秒去读。默认关，只给养号这种「每屏必抓一次树」的流程开。
+     *
+     *   ⚠️ 但别指望它解决「一屏十几秒」：实测同一台机器、同样 1200 个节点，
+     *   一趟 0.2s 也见过、20s 也见过（抖动来自系统对无障碍 IPC 的节流，与节点数无关），
+     *   而剪枝只命中 0~2 棵子树。真正的开销在「1200 个节点 × 每节点数次跨进程调用」。
      */
-    fun snapshot(ttlMs: Long = SNAPSHOT_TTL_MS, root: AccessibilityNodeInfo? = null): List<NodeFacts> {
+    fun snapshot(
+        ttlMs: Long = SNAPSHOT_TTL_MS,
+        root: AccessibilityNodeInfo? = null,
+        pruneSubtreeOfDesc: String? = null,
+        lean: Boolean = false,
+        pruneOffscreen: Boolean = false
+    ): List<NodeFacts> {
         val cached = snapshotCache
         if (cached != null && SystemClock.uptimeMillis() - cached.at <= ttlMs) return cached.facts
 
+        val startedAt = SystemClock.uptimeMillis()
         val start = root ?: root()
         if (start == null) {
             val empty = emptyList<NodeFacts>()
@@ -111,25 +145,52 @@ class Actions(
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.addLast(start)
         var visited = 0
+        var pruned = 0
         while (queue.isNotEmpty() && visited < MAX_NODES) {
             val node = queue.removeFirst()
             visited++
             // bounds 只取一次：isOnScreen 和 bottom 都要用，重复取就是重复跨进程调用
             val bounds = boundsOf(node)
+            var text: String? = null
+            var desc: String? = null
             // 屏外节点不参与判定：RecyclerView 滚出屏幕的行仍留在树里，且 bounds 已失效
             if (isOnScreen(bounds)) {
+                text = textOf(node)
+                desc = descOf(node)
                 facts += NodeFacts(
-                    text = textOf(node),
-                    desc = descOf(node),
-                    id = node.viewIdResourceName,
-                    editable = node.isEditable,
+                    text = text,
+                    desc = desc,
+                    id = if (lean) null else node.viewIdResourceName,
+                    editable = if (lean) false else node.isEditable,
                     bottom = bounds.bottom,
-                    top = bounds.top
+                    top = bounds.top,
+                    left = bounds.left,
+                    right = bounds.right
                 )
+            }
+
+            // 播放器子树整片不展开：视频页 1173 节点里绝大部分是它下面的空容器，
+            // 而养号要的文案在左下、按钮在右侧，都不在它子树里。
+            // 注意这里**没有**用 `!node.isVisibleToUser` 当剪枝条件：实测它很少命中
+            // （35 趟快照里只有 2 趟剪掉 89 个节点），却要给每个节点多一次跨进程调用。
+            val skipChildren = (pruneSubtreeOfDesc != null && desc == pruneSubtreeOfDesc) ||
+                (pruneOffscreen && isFullyOffscreen(bounds))
+            if (skipChildren) {
+                pruned++
+                continue
             }
             for (i in 0 until node.childCount) {
                 node.getChild(i)?.let { queue.addLast(it) }
             }
+        }
+        val elapsed = SystemClock.uptimeMillis() - startedAt
+        // 慢遍历必须留痕：养号在播放中的视频页上遇到过「一屏十几秒」的情况，
+        // 没有这条日志就分不清是脚本在发呆还是无障碍被系统节流了。
+        if (elapsed >= SLOW_SNAPSHOT_MS) {
+            LogStore.w(
+                TAG,
+                "快照耗时 ${elapsed}ms（遍历 $visited 节点 / 剪枝 $pruned / 保留 ${facts.size} 条）"
+            )
         }
         snapshotCache = Snapshot(SystemClock.uptimeMillis(), facts)
         return facts
@@ -244,6 +305,16 @@ class Actions(
     private fun isOnScreen(r: Rect): Boolean {
         if (r.width() <= 0 || r.height() <= 0) return false
         return r.bottom > 0 && r.top < screenHeight() && r.right > 0 && r.left < screenWidth()
+    }
+
+    /**
+     * 整棵子树都在屏幕外。用来**停止向下遍历**，与 [isOnScreen] 相反但更保守：
+     * 矩形无效（宽高 <= 0，容器没报到 bounds）时一律返回 false，绝不剪；
+     * 否则可能把风控弹窗这类「bounds 还没算好」的东西整片剪掉 —— 那是比慢严重得多的问题。
+     */
+    private fun isFullyOffscreen(r: Rect): Boolean {
+        if (r.width() <= 0 || r.height() <= 0) return false
+        return r.top >= screenHeight() || r.bottom <= 0
     }
 
     private fun matches(node: AccessibilityNodeInfo, target: Target): Boolean {
@@ -448,6 +519,22 @@ class Actions(
         return ok
     }
 
+    /**
+     * 按坐标点一下。
+     *
+     * 养号场景点的是**快照里量出来的矩形**（推荐流的点赞/收藏按钮），手边没有
+     * `AccessibilityNodeInfo`：快照刻意只存 [NodeFacts]，不在缓存里持节点引用——
+     * 那个引用随时会失效，拿着它点等于盲点。
+     *
+     * ⚠️ 这条路径**绕过了 [tapNode] 的付费守卫**（没有节点就念不出文案）。
+     * 所以调用方必须自己保证落点是「已从 desc 确认过语义的按钮」，不许拿它点未知区域。
+     */
+    suspend fun tapPoint(point: Point, label: String = "坐标点击"): Boolean {
+        val ok = dispatchTap(point)
+        LogStore.d(TAG, "$label @ ($point) → $ok")
+        return ok
+    }
+
     // ==================== 滑动 ====================
 
     /** 上滑：从下方 72% 划到上方 28%，用于列表翻页 */
@@ -644,6 +731,9 @@ class Actions(
          * 提到 1200 的代价是大页面遍历慢一些（约 1.4s → 2s），只在非高频路径（进房、恢复）上付这笔钱。
          */
         const val MAX_NODES = 1200
+
+        /** 遍历超过这个耗时就打警告（真机正常 <2s，播放中的视频页可能被系统节流到几十秒） */
+        const val SLOW_SNAPSHOT_MS = 1_500L
 
         /** 滑动横向漂移相对纵向距离的比例 */
         const val DRIFT_RATIO = 0.03f

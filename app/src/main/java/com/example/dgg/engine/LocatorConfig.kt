@@ -58,7 +58,15 @@ data class LocatorConfig(
     val pages: Map<String, PageRule>,
     val targets: Map<String, Target>,
     /** 评论采集时要直接丢弃的昵称（自己、主播、角色标签等） */
-    val excludeNicknames: Set<String> = DEFAULT_EXCLUDE_NICKNAMES
+    val excludeNicknames: Set<String> = DEFAULT_EXCLUDE_NICKNAMES,
+    /**
+     * 推荐流（养号）的行为参数。
+     *
+     * 与 [pages]/[targets] 同源同一份 JSON，但它描述的是「怎么动」而不是「控件在哪」，
+     * 所以单独成类（见 [FeedConfig]）。缺这一段时用默认值——养号是老功能的新增，
+     * 不该因为旧配置文件没有 feed 段就跑不起来。
+     */
+    val feed: FeedConfig = FeedConfig()
 ) {
 
     fun target(name: String): Target? = targets[name]
@@ -141,7 +149,7 @@ data class LocatorConfig(
                     .toSet()
             }?.takeIf { it.isNotEmpty() } ?: DEFAULT_EXCLUDE_NICKNAMES
 
-            return LocatorConfig(version, pages, targets, exclude)
+            return LocatorConfig(version, pages, targets, exclude, FeedConfig.parse(root.optJSONObject("feed")))
         }
 
         private fun parseTarget(obj: JSONObject): Target? {

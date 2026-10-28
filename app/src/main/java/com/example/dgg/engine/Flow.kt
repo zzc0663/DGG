@@ -57,7 +57,10 @@ class FlowContext(
         target: Int? = null,
         counterLabel: String? = null,
         stepIndex: Int? = null,
-        stepTotal: Int? = null
+        stepTotal: Int? = null,
+        /** 养号专用：点赞/收藏的累计数。传 null 表示不改（其余流程不关心这两个数） */
+        liked: Int? = null,
+        collected: Int? = null
     ) {
         mutate { p ->
             p.copy(
@@ -69,6 +72,8 @@ class FlowContext(
                 counterLabel = counterLabel ?: p.counterLabel,
                 stepIndex = stepIndex ?: p.stepIndex,
                 stepTotal = stepTotal ?: p.stepTotal,
+                liked = liked ?: p.liked,
+                collected = collected ?: p.collected,
                 updatedAt = System.currentTimeMillis()
             )
         }
@@ -103,9 +108,18 @@ class FlowContext(
      *
      * @param capMs 抖动后的上限。抖动是 ±30% 的话 60 分钟能漂到 78 分钟，
      *              而界面上承诺的上限是 60 分钟，所以夹住。
+     * @param jitter 是否再叠一层 ±jitter% 抖动。
+     *              养号的"停留时长"**必须传 false**：调用方已经用 `humanizer.longIn(min,max)`
+     *              掷过骰了，这里再抖一次就成了「随机叠随机」——实际区间会溢出去，
+     *              日志上写"1.5~4 秒"而实测到 5 秒，排查时会以为随机数坏了。
      */
-    suspend fun settleLong(baseMs: Long, capMs: Long = Long.MAX_VALUE, chunkMs: Long = 1_000L) {
-        var left = humanizer.delayMs(baseMs).coerceAtMost(capMs)
+    suspend fun settleLong(
+        baseMs: Long,
+        capMs: Long = Long.MAX_VALUE,
+        chunkMs: Long = 1_000L,
+        jitter: Boolean = true
+    ) {
+        var left = (if (jitter) humanizer.delayMs(baseMs) else baseMs.coerceAtLeast(1L)).coerceAtMost(capMs)
         var sincePublish = 0L
         while (left > 0) {
             val slice = minOf(chunkMs, left)

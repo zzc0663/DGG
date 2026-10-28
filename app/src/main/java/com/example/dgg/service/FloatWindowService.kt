@@ -505,8 +505,11 @@ class FloatWindowService : Service() {
         val today = FollowedStore.get(this).todayCount()
         val store = FollowedStore.get(this)
         b.floatSession.text = "本场 ${progress.followed}"
-        b.floatToday.text = "今日 $today"
-        b.floatKnown.text = "已关 ${store.knownCount()}"
+        // 养号流程会带出点赞/收藏数（关注流程一直是 0）：有数就把这两格换掉，
+        // 「今日 X」「已关 Y」对养号没有意义，继续显示反而让人以为脚本在关注别人。
+        val interacting = progress.liked > 0 || progress.collected > 0
+        b.floatToday.text = if (interacting) "赞 ${progress.liked}" else "今日 $today"
+        b.floatKnown.text = if (interacting) "藏 ${progress.collected}" else "已关 ${store.knownCount()}"
 
         val active = progress.state.isActive
         b.floatToggle.visibility = if (active) View.VISIBLE else View.GONE

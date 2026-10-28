@@ -3,7 +3,7 @@
   "_verified": "40.8.0 / OPPO PLB110（Android 17）2026-10-27 真机校准",
   "_notes_on_ids": "抖音 40.8.0 的 resource-id 全是混淆短码（j_x / gxu / 5ym / 0py），随版本变化且无规律。本文件刻意不依赖任何 id，只用 text / content-desc。",
   "_notes_on_comment_line": "实测 40.8.0 的评论是「一整行一个 text 节点」，内容为 `昵称：正文`，昵称不是独立节点，也没有稳定的 nickname id。因此不走 id 主路径，直接用冒号切分。若将来版本暴露了独立昵称节点，再补 live_comment_nickname。",
-  "version": 8,
+  "version": 10,
   "_unverified_targets": "live_comment_send 待校准（要点开评论面板才会出现「发送」）；live_mic_button 随直播间而异——实测这个直播间底栏只有 表情入口/小心心/礼物/更多面板，没有独立连线按钮，流程会记警告后跳过。",
   "excludeNicknames": [
     "我",
@@ -144,6 +144,37 @@
           "value": "关闭 按钮"
         }
       ]
+    },
+    "FEED": {
+      "threshold": 5,
+      "_measured": "40.8.0 实测：整屏一条内容 + 右侧竖排按钮栏。最硬的特征是点赞按钮的 desc「未点赞，喜欢13.3万，按钮」（w=4）——卡片流（HOME）没有这排东西。注意直播间虽然也有「视频」desc，但没有「，喜欢」，所以不会被误判成 FEED。",
+      "features": [
+        {
+          "w": 4,
+          "type": "descContains",
+          "value": "喜欢"
+        },
+        {
+          "w": 2,
+          "type": "desc",
+          "value": "视频"
+        },
+        {
+          "w": 2,
+          "type": "descContains",
+          "value": "分享"
+        },
+        {
+          "w": 1,
+          "type": "text",
+          "value": "推荐"
+        },
+        {
+          "w": 1,
+          "type": "descContains",
+          "value": "音乐"
+        }
+      ]
     }
   },
   "targets": {
@@ -189,7 +220,47 @@
     "back": {
       "type": "descContains",
       "value": "返回"
+    },
+    "nav_home_tab": {
+      "type": "desc",
+      "value": "首页，按钮"
+    },
+    "feed_tab_recommend": {
+      "type": "text",
+      "value": "推荐"
     }
+  },
+  "feed": {
+    "_note": "养号（M4）的行为参数，不是控件。全部有内置默认值，缺字段不影响解析；改版时只改这一段即可，不必发版。",
+    "copyAreaTopRatio": 0.78,
+    "copyMaxCandidates": 3,
+    "copyExcludeHints": [
+      "，按钮", "已选中", "未选中", "喜欢", "评论", "分享", "收藏", "音乐",
+      "人推荐", "推荐按钮", "搜同款", "玩同款", "拍同款", "发弹幕", "进度条",
+      "图片", "动图", "说点什么", "关注", "播放视频", "暂停视频", "首页", "朋友",
+      "展开", "道具", "全屏", "倍速", "清屏",
+      "消息", "我", "直播", "团购", "广州", "商城", "搜索", "侧边栏", "拍摄"
+    ],
+    "likeHint": "喜欢",
+    "likeOn": "已点赞",
+    "likeOff": "未点赞",
+    "collectHint": "收藏",
+    "collectOn": "已选中，收藏",
+    "collectOff": "未选中，收藏",
+    "liveCardHints": ["点击进入直播间", "直播中"],
+    "liveCardMinAreaRatio": 0.12,
+    "adHints": ["搜同款", "购买", "商品", "购物", "广告"],
+    "imageHints": ["图片", "动图"],
+    "swipeFromYMin": 0.6,
+    "swipeFromYMax": 0.68,
+    "swipeToYMin": 0.18,
+    "swipeToYMax": 0.25,
+    "swipeXMin": 0.3,
+    "swipeXMax": 0.7,
+    "videoContainerDesc": "",
+    "stallAbortRounds": 8,
+    "stallSameScreenRounds": 6,
+    "rightRailLeftRatio": 0.8
   },
   "_calibrated_pages": "HOME 9/6、SEARCH 8/5、SEARCH_RESULT 8/5、USER_PROFILE 8/5、LIVE_ROOM 8/5 —— 全部在真机上用「识别当前页面」实测通过（得分/阈值）。",
   "_notes_on_search_input": "搜索框里默认填的是「推荐搜索词」（实测是某个视频标题），既不是「搜索」也不是空串，按文本永远命不中——只能按 editable 找。",

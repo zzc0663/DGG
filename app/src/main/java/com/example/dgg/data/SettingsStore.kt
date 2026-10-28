@@ -59,6 +59,8 @@ class SettingsStore private constructor(context: Context) {
             probCollect = sp.getInt(KEY_PROB_COLLECT, d.probCollect),
             probComment = sp.getInt(KEY_PROB_COMMENT, d.probComment),
             probShare = sp.getInt(KEY_PROB_SHARE, d.probShare),
+            nurtureTags = sp.getString(KEY_NURTURE_TAGS, d.nurtureTags).orEmpty(),
+            nurturePace = sp.getInt(KEY_NURTURE_PACE, d.nurturePace),
             enterMode = sp.getInt(KEY_ENTER_MODE, d.enterMode),
             micRequest = sp.getBoolean(KEY_MIC_REQUEST, d.micRequest),
             commentGapMin = sp.getInt(KEY_GAP_MIN, d.commentGapMin),
@@ -91,6 +93,8 @@ class SettingsStore private constructor(context: Context) {
             .putInt(KEY_PROB_COLLECT, s.probCollect)
             .putInt(KEY_PROB_COMMENT, s.probComment)
             .putInt(KEY_PROB_SHARE, s.probShare)
+            .putString(KEY_NURTURE_TAGS, s.nurtureTags)
+            .putInt(KEY_NURTURE_PACE, s.nurturePace)
             .putInt(KEY_ENTER_MODE, s.enterMode)
             .putBoolean(KEY_MIC_REQUEST, s.micRequest)
             .putInt(KEY_GAP_MIN, s.commentGapMin)
@@ -139,6 +143,8 @@ class SettingsStore private constructor(context: Context) {
         private const val KEY_PROB_COLLECT = "prob_collect"
         private const val KEY_PROB_COMMENT = "prob_comment"
         private const val KEY_PROB_SHARE = "prob_share"
+        private const val KEY_NURTURE_TAGS = "nurture_tags"
+        private const val KEY_NURTURE_PACE = "nurture_pace"
         private const val KEY_ENTER_MODE = "enter_mode"
         private const val KEY_MIC_REQUEST = "mic_request"
         private const val KEY_GAP_MIN = "gap_min"

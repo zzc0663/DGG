@@ -34,12 +34,28 @@ data class Settings(
 
     // ===== 养号助手 =====
     val runMinutes: Int = 60,
-    /** 养号模式：0=挂机涨粉 1=垂直养号 2=首页连播 */
+    /** 养号模式：0=刷视频养号 1=垂直养号 2=首页连播（只刷不互动） */
     val nurtureMode: Int = 0,
+    /**
+     * 点赞**倾向**（基线概率，%）。
+     *
+     * 它不再等于最终概率：命中文案标签会按 `base × (1 + Σ加成)` 放大，上限
+     * [NurtureTags.MAX_LIKE_PERCENT] = 60。默认仍 40，用户不配标签时行为与旧版一致。
+     */
     val probLike: Int = 40,
     val probCollect: Int = 15,
     val probComment: Int = 10,
     val probShare: Int = 5,
+    /**
+     * 文案标签规则，一段多行文本（每行「关键词」或「关键词 加成%」）。
+     *
+     * 存原始文本而不是解析后的结构：用户手写的内容原样保留（含写错的行），
+     * 下次打开编辑框能看见自己写的东西，不会"我写的规则怎么自己消失了"。
+     * 解析在 [com.example.dgg.engine.NurtureTags.parse]，容错到逐行粒度。
+     */
+    val nurtureTags: String = "",
+    /** 停留节奏：0=慢 1=标准 2=快（整体缩放停留时长） */
+    val nurturePace: Int = PACE_NORMAL,
 
     // ===== 直播互动 =====
     /** 进入方式：0=手动进入 1=系统推荐 */
@@ -76,6 +92,20 @@ data class Settings(
         /** 单位 */
         const val UNIT_SECOND = 0
         const val UNIT_MINUTE = 1
+
+        /** 停留节奏 */
+        const val PACE_SLOW = 0
+        const val PACE_NORMAL = 1
+        const val PACE_FAST = 2
+
+        /** 养号模式 */
+        const val NURTURE_SWIPE = 0
+        const val NURTURE_VERTICAL = 1
+        const val NURTURE_HOME = 2
+
+        /** 运行时长范围（分钟） */
+        const val RUN_MINUTES_MIN = 1
+        const val RUN_MINUTES_MAX = 1440
 
         /** 默认 30 秒（降封号：宁慢不快，原 1.5 秒过于机器化） */
         const val DEFAULT_SCAN_VALUE = 30

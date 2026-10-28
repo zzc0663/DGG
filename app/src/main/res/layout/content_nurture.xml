@@ -41,6 +41,46 @@
                 style="@style/InputBox"
                 android:layout_marginTop="6dp"
                 android:text="60" />
+
+            <TextView
+                style="@style/TxtFieldLabel"
+                android:layout_marginTop="14dp"
+                android:text="停留节奏（每条视频看多久）" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/seg_pace_slow"
+                    style="@style/SegItem"
+                    android:background="@drawable/bg_chip_normal"
+                    android:text="慢" />
+
+                <TextView
+                    android:id="@+id/seg_pace_normal"
+                    style="@style/SegItemSelected"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_segment_selected"
+                    android:text="标准" />
+
+                <TextView
+                    android:id="@+id/seg_pace_fast"
+                    style="@style/SegItem"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_chip_normal"
+                    android:text="快" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="标准节奏下每条约看 1.5～90 秒（多数 2～12 秒），慢/快分别把整体时长乘 1.6 / 0.6"
+                android:textColor="@color/text_tertiary"
+                android:textSize="11sp" />
         </LinearLayout>
 
         <!-- ==================== 养号模式 ==================== -->
@@ -62,7 +102,7 @@
                     android:id="@+id/seg_mode_idle"
                     style="@style/SegItemSelected"
                     android:background="@drawable/bg_segment_selected"
-                    android:text="挂机涨粉" />
+                    android:text="刷视频养号" />
 
                 <TextView
                     android:id="@+id/seg_mode_vertical"
@@ -89,7 +129,7 @@
                 android:paddingTop="9dp"
                 android:paddingEnd="10dp"
                 android:paddingBottom="9dp"
-                android:text="挂机涨粉：搜索关键词用户，浏览粉丝列表互动涨粉"
+                android:text="刷视频养号：自己上下滑推荐流，按随机节奏观看，命中标签时概率点赞"
                 android:textColor="@color/text_secondary"
                 android:textSize="12sp" />
         </LinearLayout>
@@ -122,7 +162,7 @@
                     android:textSize="12sp" />
             </LinearLayout>
 
-            <!-- 点赞概率 -->
+            <!-- 点赞倾向（基线概率，命中标签会被放大） -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -134,7 +174,7 @@
                     style="@style/TxtRowTitle"
                     android:layout_width="0dp"
                     android:layout_weight="1"
-                    android:text="点赞概率" />
+                    android:text="点赞倾向（基线）" />
 
                 <TextView
                     android:id="@+id/tv_pct_like"
@@ -153,13 +193,52 @@
                 android:stepSize="5"
                 android:value="40"
                 android:valueFrom="0"
-                android:valueTo="40"
+                android:valueTo="60"
                 app:haloColor="#26E1251B"
                 app:labelBehavior="gone"
                 app:thumbColor="@color/brand_red"
                 app:tickVisible="false"
                 app:trackColorActive="@color/brand_red"
                 app:trackColorInactive="@color/switch_track_off" />
+
+            <!-- 文案标签加权 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/tv_tag_summary"
+                    style="@style/TxtRowTitle"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:text="文案标签加权" />
+
+                <TextView
+                    android:id="@+id/tv_tag_edit"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_chip_normal"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:paddingStart="10dp"
+                    android:paddingTop="5dp"
+                    android:paddingEnd="10dp"
+                    android:paddingBottom="5dp"
+                    android:text="编辑"
+                    android:textColor="@color/brand_red"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="视频文案命中标签时，点赞概率按「基线 × (1 + 加成)」放大，最高到 60%"
+                android:textColor="@color/text_tertiary"
+                android:textSize="11sp" />
 
             <!-- 收藏概率 -->
             <LinearLayout
@@ -282,7 +361,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="⚠ 为避免触发风控，每项概率最多设置 40%"
+                android:text="⚠ 为避免触发风控，点赞最多 60%，其余每项最多 40%"
                 android:textColor="@color/warning_amber"
                 android:textSize="11sp" />
         </LinearLayout>
