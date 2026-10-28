@@ -19,6 +19,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import com.example.dgg.R
 import com.example.dgg.data.LogStore
+import com.example.dgg.data.PermissionGuard
 import com.example.dgg.data.Settings
 import com.example.dgg.data.SettingsStore
 import com.example.dgg.data.license.LicenseProvider
@@ -84,6 +85,12 @@ class MainActivity : AppCompatActivity() {
     private var lastPromptedVersion = 0
     private var lastOtaCheck = 0L
 
+    /** 权限恢复向导的待办队列（无障碍 → 悬浮窗 → 通知），空表示当前没有流程在跑 */
+    private val pendingRestore = ArrayDeque<PermissionGuard.Kind>()
+
+    /** 本次进程内只提醒一次，避免每次 onResume 都弹 */
+    private var permissionLossWarned = false
+
     private lateinit var tabs: List<TextView>
     private lateinit var indicators: List<View>
     private lateinit var pages: List<View>
@@ -121,6 +128,9 @@ class MainActivity : AppCompatActivity() {
             LogStore.i(TAG, "通知权限申请结果：${if (granted) "已授予" else "被拒绝"}")
             refreshPermissionState()
             if (!granted) toast("通知被拒绝，可稍后在系统设置中手动开启")
+            // 恢复向导里通知是最后一项；它走的是系统权限弹窗（不是 Activity），
+            // 所以推进队列必须挂在这个回调上，onResume 不一定触发
+            if (pendingRestore.isNotEmpty()) advanceRestore(skipCurrent = true)
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -147,7 +157,14 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         // 从系统设置页返回后必须重新读一次，否则用户授权了却仍显示未授权
-        refreshPermissionState()
+        val state = refreshPermissionState()
+        // 恢复向导：刚从设置页回来 → 推进到下一项（每项只跳一次，避免在设置页之间来回打转）
+        if (pendingRestore.isNotEmpty()) {
+            advanceRestore(skipCurrent = true)
+            return
+        }
+        // 权限被升级/重装/系统清理重置时，主动喊一声——这几个权限没了应用是静默残废的
+        warnIfPermissionsLost(state)
     }
 
     override fun onDestroy() {
@@ -206,19 +223,99 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun refreshPermissionState() {
+    private fun refreshPermissionState(): AppPermissions.State {
         val state = AppPermissions.state(this)
         listOf(
             binding.contentAuto.permCard,
             binding.contentNurture.permCard,
             binding.contentLive.permCard
         ).forEach { it.render(state) }
+        // 记住「曾经授予过」，升级/重装后丢权时才有依据提醒（见 PermissionGuard）
+        PermissionGuard.remember(this, state)
 
         LogStore.d(
             TAG,
             "权限状态：无障碍=${state.accessibility} 悬浮窗=${state.overlay} " +
                 "通知=${state.notification} 电池优化忽略=${state.batteryUnrestricted}"
         )
+        return state
+    }
+
+    /**
+     * 权限丢失提醒 + 逐项恢复向导。
+     *
+     * 为什么必须做成"常驻检查"而不是一次性提示：这三项权限丢掉之后应用不会崩，
+     * 只会**静默失效**（点开始服务报「无障碍未开启」、悬浮窗不见了、通知栏没有进度）。
+     * 用户很容易以为是自己操作错了，而真正的原因发生在几天前的某次升级。
+     */
+    private fun warnIfPermissionsLost(state: AppPermissions.State) {
+        if (permissionLossWarned) return
+        val lost = PermissionGuard.lost(this, state)
+        if (lost.isEmpty()) return
+        permissionLossWarned = true
+        LogStore.w(
+            TAG,
+            "权限已失效：${lost.joinToString("、") { it.label }}（${PermissionGuard.describe(this)}）"
+        )
+        val message = buildString {
+            append("下列权限曾经授予过，现在失效了（应用升级、重装、强制停止或系统清理都可能造成）：\n\n")
+            lost.forEach { append("· ").append(it.label).append("：").append(it.why).append('\n') }
+            append("\n不恢复的话，脚本启动后会直接失败或静默失效。")
+        }
+        AlertDialog.Builder(this)
+            .setTitle("权限被重置了")
+            .setMessage(message)
+            .setPositiveButton("逐项恢复") { _, _ -> startRestoreQueue(lost) }
+            .setNegativeButton("稍后", null)
+            .show()
+    }
+
+    private fun startRestoreQueue(kinds: List<PermissionGuard.Kind>) {
+        pendingRestore.clear()
+        pendingRestore.addAll(kinds)
+        advanceRestore(skipCurrent = false)
+    }
+
+    /**
+     * 推进恢复队列。
+     *
+     * @param skipCurrent true 表示"刚跳过的那一项已经试过了"（从设置页返回/权限弹窗关闭时）——
+     *   失败也不重跳，否则用户拒绝授权就会被无限弹回设置页。剩下的项用户可以点卡片单独处理。
+     */
+    private fun advanceRestore(skipCurrent: Boolean) {
+        if (skipCurrent && pendingRestore.isNotEmpty()) pendingRestore.removeFirst()
+        while (pendingRestore.isNotEmpty()) {
+            val kind = pendingRestore.first()
+            if (isPermissionGranted(kind)) {
+                pendingRestore.removeFirst()
+                continue
+            }
+            LogStore.i(TAG, "恢复向导：跳转「${kind.label}」")
+            openPermission(
+                when (kind) {
+                    PermissionGuard.Kind.ACCESSIBILITY -> PermissionCardView.Kind.ACCESSIBILITY
+                    PermissionGuard.Kind.OVERLAY -> PermissionCardView.Kind.OVERLAY
+                    PermissionGuard.Kind.NOTIFICATION -> PermissionCardView.Kind.NOTIFICATION
+                }
+            )
+            return
+        }
+        val state = refreshPermissionState()
+        if (PermissionGuard.lost(this, state).isEmpty()) {
+            LogStore.i(TAG, "权限恢复完成：无障碍/悬浮窗/通知三项齐全")
+            toast("权限已全部恢复")
+        } else {
+            toast("还有权限未恢复，可在「权限设置」里单独授权")
+        }
+    }
+
+    private fun isPermissionGranted(kind: PermissionGuard.Kind): Boolean {
+        val state = AppPermissions.state(this)
+        return when (kind) {
+            PermissionGuard.Kind.ACCESSIBILITY -> state.accessibility
+            PermissionGuard.Kind.OVERLAY -> state.overlay
+            PermissionGuard.Kind.NOTIFICATION -> state.notification
+        }
     }
 
     private fun openPermission(kind: PermissionCardView.Kind) {

@@ -219,7 +219,7 @@ HyperOS / ColorOS 对"侧载应用自安装"有「风险应用」拦截，可能
 
 ### 7.4 versionCode 策略（必须先定）
 
-现在是 `versionCode = 1`。OTA 的整套判断依赖它单调递增：
+现在是 `versionCode = 2 / versionName = 1.1`（授权服务端 + OTA 这一批）。OTA 的整套判断依赖它单调递增：
 
 - 每次发布 +1，**永不复用、永不减小**；
 - `versionName` 与 `versionCode` 一一对应（如 1.0.0/1、1.0.1/2 …）；
@@ -236,6 +236,38 @@ versionName = project.findProperty("dgg.versionName") as String? ?: "1.0"
 与工程现有"极简依赖"风格一致（当前只有 4 个 implementation）。
 代价：重定向/超时/异常要手写，约 150 行，比 OkHttp 多些样板，但可控且不增加 APK 体积与混淆面。
 
+### 7.6 「升级后权限会不会丢」——实测 + 守卫
+
+这是升级功能里最容易被忽略、后果又最严重的一环：本应用**离开无障碍 / 悬浮窗 / 通知就静默残废**，
+而这三项恰好都是"系统层面可能被重置"的授权。
+
+**实测结论（OPPO PLB110 / Android 17）**：
+
+| 操作 | 无障碍 | 悬浮窗 | 通知 | 结论 |
+|---|---|---|---|---|
+| `install -r` 升级 v1 → v2（同签名、versionCode 递增） | 保留 | 保留 | 保留 | ✅ 正常 OTA 升级**不丢权限** |
+| `install -r` 覆盖同 versionCode 重装 | 保留 | 保留 | 保留 | ✅ |
+| 卸载重装（`firstInstallTime` 变化） | 丢 | 丢 | 丢 | ❌ 全丢 |
+| `am force-stop` | **丢**（Secure 表被清空） | 保留 | 保留 | ❌ 无障碍单独丢 |
+
+即：**正常升级路径本身是安全的**，真正的危险来自卸载重装与强制停止 —— 前者是开发期常态，
+后者是系统清理/用户手动操作的常见结果。
+
+**因此加了守卫 `data/PermissionGuard.kt`**：
+
+- 记住每个权限**是否曾经授予过**（`ever_*` 只置 true、永不回清）；
+- 每次 `onResume` 读一次真实状态，发现「曾有今无」就弹「权限被重置了」，
+  逐条列出缺失项 + 该项失效的具体后果，并给「逐项恢复」向导（无障碍 → 悬浮窗 → 通知）；
+- 恢复向导**每项只跳一次**：用户拒绝授权不会被无限弹回设置页，剩下的人工点卡片处理；
+- 通知项走系统权限弹窗（`POST_NOTIFICATIONS`），推进逻辑挂在 launcher 回调上（不是 `onResume`）。
+
+**验证证据**：`am force-stop` 后重启 → 弹窗只列出「无障碍服务」（另两项确实还在）→
+点「逐项恢复」跳到无障碍设置页（`mCurrentFocus=com.android.settings/SubSettings`）→
+恢复后回到应用，日志 `权限状态：无障碍=true 悬浮窗=true 通知=true`。
+
+**给运维的一句话**：发版永远用**同签名 + versionCode 递增**的正常升级；
+需要卸载重装时（例如换签名），必须提前告知用户"升级后要重新授权"。
+
 ---
 
 ## 8. 分阶段实施
@@ -246,7 +278,7 @@ versionName = project.findProperty("dgg.versionName") as String? ?: "1.0"
 | **P1** 下载与校验 | `OtaDownloader`（Range + sha256）、`OtaVerifier`（4 道校验） | 能把本地/远端 APK 下完并验签 | ✅ d0aaa87 |
 | **P2** 安装与 UI | `OtaInstaller`、`file_paths.xml` 加 ota 目录、顶部入口、更新弹窗、未知来源引导 | 端到端可装 | ✅ 710bd3e |
 | **P3** 后台与服务 | `OtaService`（dataSync）前台下载 + 通知进度 + 取消、冷启动恢复待安装入口 | 切后台不中断 | ✅ 见 §9.3 |
-| **P4** 联调与文档 | `RemoteOtaProvider`、`docs/OTA-接口契约.md`（给云端）、LogStore 埋点 | 可交付 | 代码 ✅ / 契约文档待写 |
+| **P4** 联调与文档 | `RemoteOtaProvider`、`docs/OTA-接口契约.md`（给云端）、LogStore 埋点 | 可交付 | ✅ 代码 + 契约见 `docs/OTA-接口契约.md` |
 
 **强制更新已确认不做**（用户拍板），所以「落"拦截开始服务"」从 P3 里去掉：
 更新提示永远可以被「稍后 / 忽略此版本」跳过。
