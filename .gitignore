@@ -9,6 +9,12 @@ captures/
 # ===== 本机配置（含 sdk.dir 等本机路径，禁止入库）=====
 local.properties
 
+# ===== 发布签名（禁止入库；离线备份）=====
+keystore.properties
+*.jks
+*.keystore
+.signing/
+
 # ===== IDE =====
 *.iml
 .idea/
