@@ -67,9 +67,13 @@ android {
         }
         release {
             signingConfig = signingConfigs.findByName("release")
+            // 只混淆本工程自己的代码。曾把 androidx.** / kotlin.** / kotlinx.** 也放进 scope，
+            // 结果 release 包启动即崩：IllegalAccessError: Class kotlin.collections.h extended by
+            // class j7 is inaccessible（androidx.startup.InitializationProvider 初始化时类加载失败）。
+            // 第三方库不参与改名，只跟随 shrinking；真要混淆它们必须逐库补 keep 规则。
             optimization {
                 enable = true
-                packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
+                packageScope = setOf("com.example.dgg.**")
             }
         }
     }
