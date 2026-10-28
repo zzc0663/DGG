@@ -43,6 +43,7 @@ import com.example.dgg.engine.flow.FollowFromLiveFlow
 import com.example.dgg.engine.flow.LiveInteractFlow
 import com.example.dgg.engine.risk.Humanizer
 import com.example.dgg.service.DebugChannel
+import com.example.dgg.service.OtaService
 import com.example.dgg.service.DggAccessibilityService
 import com.example.dgg.service.EngineController
 import com.example.dgg.util.AppPermissions
@@ -602,6 +603,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupOta() {
         OtaManager.installProvider(RemoteOtaProvider(this))
+        // 先恢复「上次已经下好、还没装」的状态，再订阅：冷启动时入口不该消失
+        OtaManager.restoreReady(this)
         uiScope.launch {
             OtaManager.state.collect { renderOtaState(it) }
         }
@@ -693,21 +696,17 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
+    /**
+     * 下载交给前台服务，**不在 Activity 里跑**。
+     *
+     * 之前这里是 `uiScope.launch { OtaManager.downloadAndVerify(...) }`，切后台即被冻结、
+     * Activity 重建就被取消；而下载恰好是用户最容易切走的环节（十几 MB、几十秒）。
+     * 现在服务持有下载，界面只通过 `OtaManager.state` 看进度；下完不会自动安装，
+     * 用户在通知里或界面上点「安装」才调起系统安装器。
+     */
     private fun downloadUpdate(manifest: OtaManifest) {
-        toast("开始下载 ${manifest.versionName}")
-        uiScope.launch {
-            OtaManager.downloadAndVerify(this@MainActivity, manifest).fold(
-                onSuccess = { file ->
-                    OtaInstaller.install(this@MainActivity, file).onFailure {
-                        toast(it.message ?: "安装包已下载，请点「安装更新」重试")
-                    }
-                },
-                onFailure = { error ->
-                    toast(error.message ?: "下载失败")
-                    LogStore.e(TAG, "OTA 下载失败：${error.message}")
-                }
-            )
-        }
+        OtaService.start(this, manifest)
+        toast("已在后台下载 ${manifest.versionName}，可在通知栏查看进度")
     }
 
     private fun formatBytes(bytes: Long): String =

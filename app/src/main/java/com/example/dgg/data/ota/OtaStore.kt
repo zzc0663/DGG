@@ -36,8 +36,22 @@ class OtaStore private constructor(context: Context) {
         get() = sp.getInt(KEY_READY_VERSION, 0)
         set(value) = sp.edit().putInt(KEY_READY_VERSION, value).apply()
 
+    /**
+     * 就绪包对应的完整 manifest（json 字符串）。
+     *
+     * 为什么连它一起存：进程被杀后在冷启动要能重建 `OtaState.Ready`（界面显示「安装 vX」），
+     * 而 `Ready` 需要 versionName/changelog 这些字段；只存路径 + versionCode 恢复不出完整界面。
+     */
+    var readyManifestJson: String?
+        get() = sp.getString(KEY_READY_MANIFEST, null)
+        set(value) = sp.edit().putString(KEY_READY_MANIFEST, value).apply()
+
     fun clearReady() {
-        sp.edit().remove(KEY_READY_PATH).remove(KEY_READY_VERSION).apply()
+        sp.edit()
+            .remove(KEY_READY_PATH)
+            .remove(KEY_READY_VERSION)
+            .remove(KEY_READY_MANIFEST)
+            .apply()
     }
 
     companion object {
@@ -47,6 +61,7 @@ class OtaStore private constructor(context: Context) {
         private const val KEY_IGNORED = "ignored_version_code"
         private const val KEY_READY_PATH = "ready_path"
         private const val KEY_READY_VERSION = "ready_version_code"
+        private const val KEY_READY_MANIFEST = "ready_manifest_json"
 
         @Volatile
         private var instance: OtaStore? = null

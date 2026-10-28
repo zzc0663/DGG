@@ -240,13 +240,16 @@ versionName = project.findProperty("dgg.versionName") as String? ?: "1.0"
 
 ## 8. 分阶段实施
 
-| 阶段 | 内容 | 产出 |
-|---|---|---|
-| **P0** 接口与骨架 | `OtaManifest` / `OtaProvider` / `LocalOtaProvider` / `OtaStore` / `OtaManager` 状态机 | 能"伪造一个 manifest → 进入 AVAILABLE 状态" |
-| **P1** 下载与校验 | `OtaDownloader`（Range + sha256）、`OtaVerifier`（4 道校验） | 能把本地/远端 APK 下完并验签 |
-| **P2** 安装与 UI | `OtaInstaller`、`file_paths.xml` 加 ota 目录、顶部入口、更新弹窗、未知来源引导 | 端到端可装 |
-| **P3** 后台与策略 | `OtaService` 前台下载 + 通知进度、静默检查、忽略版本、强制更新拦截「开始服务」 | 完整可用 |
-| **P4** 联调与文档 | `docs/OTA-接口契约.md`（给云端）、本地自测脚本、LogStore 埋点 | 可交付 |
+| 阶段 | 内容 | 产出 | 状态 |
+|---|---|---|---|
+| **P0** 接口与骨架 | `OtaManifest` / `OtaProvider` / `LocalOtaProvider` / `OtaStore` / `OtaManager` 状态机 | 能"伪造一个 manifest → 进入 AVAILABLE 状态" | ✅ d0aaa87 |
+| **P1** 下载与校验 | `OtaDownloader`（Range + sha256）、`OtaVerifier`（4 道校验） | 能把本地/远端 APK 下完并验签 | ✅ d0aaa87 |
+| **P2** 安装与 UI | `OtaInstaller`、`file_paths.xml` 加 ota 目录、顶部入口、更新弹窗、未知来源引导 | 端到端可装 | ✅ 710bd3e |
+| **P3** 后台与服务 | `OtaService`（dataSync）前台下载 + 通知进度 + 取消、冷启动恢复待安装入口 | 切后台不中断 | ✅ 见 §9.3 |
+| **P4** 联调与文档 | `RemoteOtaProvider`、`docs/OTA-接口契约.md`（给云端）、LogStore 埋点 | 可交付 | 代码 ✅ / 契约文档待写 |
+
+**强制更新已确认不做**（用户拍板），所以「落"拦截开始服务"」从 P3 里去掉：
+更新提示永远可以被「稍后 / 忽略此版本」跳过。
 
 预估 3 天（P0 半天 / P1 一天 / P2 半天 / P3 半天 / P4 半天）。
 
@@ -262,7 +265,9 @@ versionName = project.findProperty("dgg.versionName") as String? ?: "1.0"
    - `OTAJSON <json>`：覆盖 `files/ota_manifest.json`，构造"有更新 / 非法 url"等场景；
    - `OTACHECK`：走完整 `OtaManager.check()`，等价于点「升级」；
    - `OTADL <url> <sha256>`：**只测下载 + 校验**（不落 `Ready` 状态），验证续传与 sha256；
-   - `OTAVERIFY <绝对路径>`：直接喂一个本地 APK 给 `OtaVerifier`，负向用例全靠它。
+   - `OTAVERIFY <绝对路径>`：直接喂一个本地 APK 给 `OtaVerifier`，负向用例全靠它；
+   - `OTASTART <versionCode> <versionName> <url> <sha256>`：走**生产链路** `OtaService`
+     前台下载 + 通知进度。P3 靠它验证，不需要授权，也不用点界面（「升级」入口要授权后才出现）。
 3. **本地就有一个"真"下载服务器**：`python -m http.server` **不支持 Range**（一律 200），
    只能验证降级分支。要验 206 必须用支持 Range 的服务端（自写的 `.tmp/ota-test/range_server.py`，
    行为对齐 CDN：`Range: bytes=N-` → 206 + `Content-Range`，起点越界 → 416）。
@@ -306,6 +311,29 @@ sha256 `21c494b2…10c1c156`，`adb reverse` + 本地 HTTP 提供。
 4. **`adb push` 的目标是设备路径时**必须 `MSYS_NO_PATHCONV=1`，否则 `/data/local/tmp/x` 会被 MSYS
    翻译成 `D:/software/.../data/local/tmp/x` 而失败（`remote secure_mkdirs() failed`）；
    但**源路径要留相对路径**（如 `.tmp/ota-test/x`），否则同样被当成不存在的绝对路径。
+
+### 9.3 P3 真机验证（2026-10-28，OPPO PLB110 / Android 17）
+
+前置：`OTASTART 2 1.0.1 <url> <sha256>`，服务端限速 400 KB/s（`.tmp/ota-test/range_server.py?rate=`）
+把 6 MB 的包拉成 ~15 秒，好在下载途中切后台。
+
+| 观察点 | 实测 |
+|---|---|
+| 服务起来了 | `OTASTART：已请求 OtaService 下载 1.0.1(2)` → `OTA服务: 开始下载 1.0.1(2)` |
+| **FGS 类型正确** | `ServiceRecord{...OtaService}` 里 `isForeground=true foregroundId=1002 **types=0x00000001**`（= `DATA_SYNC`） |
+| 通知挂着 | `foregroundNoti=Notification(channel=dgg_ota ... flags=ONGOING_EVENT|ONLY_ALERT_ONCE|FOREGROUND_SERVICE actions=1)` |
+| **切后台不中断** | 22:15:26 开始 → 按 HOME → 22:15:41 `下载完成并校验通过：dgg-2.apk（5994021 字节）` |
+| 服务自行退出 | 完成后 `dumpsys activity services` 里 OtaService 记录数 = 0 |
+| 冷启动恢复入口 | `恢复待安装状态：1.0.1(2)`，标题栏出现红色「安装 1.0.1」（截图确认） |
+| 记录自清理 | 包被删掉后重启：`上次的安装包已不可用（文件缺失或记录损坏），清理` |
+
+**体感差别**：改造前下载绑在 `MainActivity.uiScope` 上，切后台被冻结/重建即取消；
+现在下载归服务、界面只订阅 `OtaManager.state`，通知栏有进度和「取消下载」。
+
+一个副作用要知道：Android 的 `cache/ota` 是「下载完 ≠ 装上」，所以**冷启动必须恢复 Ready 状态**，
+否则用户会在缓存里留个 6 MB 的包却找不到「安装」按钮。这就是新增 `OtaStore.readyManifestJson`
+与 `OtaManager.restoreReady()` 的原因（只存路径 + versionCode 恢复不出完整界面）。
+
 
 ---
 

@@ -26,6 +26,24 @@ data class OtaManifest(
     val channel: String = "",
     val publishedAt: Long = 0
 ) {
+    /**
+     * 序列化回契约形状。
+     *
+     * 唯一用途是**持久化「已下载待安装」这个状态**：进程重启后要能恢复出「安装 v1.0.1」这个入口，
+     * 而 `OtaState.Ready` 需要完整 manifest。存 json 比在 SharedPreferences 里散着存五个字段更好维护，
+     * 也保证解析/序列化用的是同一套字段名（见 [parse] 的白名单）。
+     */
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("versionCode", versionCode)
+        put("versionName", versionName)
+        put("url", url)
+        put("sha256", sha256)
+        put("size", size)
+        put("changelog", changelog)
+        put("channel", channel)
+        put("publishedAt", publishedAt)
+    }
+
     companion object {
         private const val TAG = "OTA"
 

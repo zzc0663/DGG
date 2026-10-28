@@ -11,6 +11,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
+    <!-- OTA 下载用 dataSync 前台服务：这是「在后台传输数据」唯一对得上的类型 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
     <!-- 状态悬浮窗（特殊权限，走 Settings 授权，不是运行时权限） -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
@@ -96,6 +99,15 @@
         <service
             android:name=".service.FloatWindowService"
             android:exported="false" />
+
+        <!--
+          更新包下载。dataSync：Android 14+ 起必须与声明的权限 FOREGROUND_SERVICE_DATA_SYNC 对应，
+          否则 startForeground 直接抛 SecurityException。系统给的 6 小时上限远大于本场景。
+        -->
+        <service
+            android:name=".service.OtaService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- 日志导出：把 cache/logs 下的 txt 以 content:// 分享出去 -->
         <provider

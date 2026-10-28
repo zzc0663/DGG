@@ -321,6 +321,26 @@ object DebugChannel {
                 }
             }
 
+            cmd.startsWith("OTASTART ") -> {
+                // OTASTART <versionCode> <versionName> <url> <sha256>
+                // 走**生产链路**：OtaService 前台服务下载 + 通知进度。用来验证 P3，
+                // 不需要授权、也不需要点界面（「升级」入口要授权后才出现）。
+                val args = payload.split(Regex("\\s+")).filter { it.isNotEmpty() }
+                val code = args.getOrNull(0)?.toIntOrNull() ?: 0
+                if (service == null || args.size < 4 || code <= 0) {
+                    LogStore.w(TAG, "OTASTART 用法：OTASTART <versionCode> <versionName> <url> <sha256>")
+                    return
+                }
+                val manifest = com.example.dgg.data.ota.OtaManifest(
+                    versionCode = code,
+                    versionName = args[1],
+                    url = args[2],
+                    sha256 = args[3]
+                )
+                com.example.dgg.service.OtaService.start(service, manifest)
+                LogStore.i(TAG, "OTASTART：已请求 OtaService 下载 ${manifest.versionName}($code)")
+            }
+
             else -> LogStore.w(TAG, "未知命令：$cmd")
         }
     }

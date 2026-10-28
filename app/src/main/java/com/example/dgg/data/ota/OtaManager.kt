@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.json.JSONObject
 import java.io.File
 
 /** OTA 状态。单一数据源，界面/通知/日志都读它（与 `TaskEngine.progress` 同构）。 */
@@ -137,6 +138,7 @@ object OtaManager {
                     OtaStore.get(context).apply {
                         readyPath = file.absolutePath
                         readyVersionCode = manifest.versionCode
+                        readyManifestJson = manifest.toJson().toString()
                     }
                     _state.value = OtaState.Ready(file, manifest)
                     LogStore.i(TAG, "安装包就绪：${manifest.versionName}(${verify.versionCode})，等待用户安装")
@@ -159,6 +161,39 @@ object OtaManager {
         LogStore.i(TAG, "用户忽略版本 $versionCode")
         OtaStore.get(context).ignoredVersionCode = versionCode
         _state.value = OtaState.Idle
+    }
+
+    /**
+     * 冷启动恢复「已经下载好、等着安装」的状态。
+     *
+     * 为什么需要：下载在服务里跑完、`OtaState` 只在内存里；进程一被杀，入口就没了，
+     * 用户会在 `cache/ota` 里留一个 6MB 的包却找不到「安装」按钮。这里把持久化状态还原成
+     * `OtaState.Ready`，界面照常渲染。
+     *
+     * 顺手做两个自清理：文件不在了 / 这个版本已经装上了 → 清掉记录，不留幽灵入口。
+     *
+     * @return 是否恢复出了 Ready 状态
+     */
+    fun restoreReady(context: Context): Boolean {
+        val store = OtaStore.get(context)
+        val path = store.readyPath ?: return false
+        val json = store.readyManifestJson ?: return false
+        val file = File(path)
+        val manifest = runCatching { OtaManifest.parse(JSONObject(json)) }.getOrNull()
+        if (manifest == null || !file.isFile || file.length() <= 0L) {
+            LogStore.w(TAG, "上次的安装包已不可用（文件缺失或记录损坏），清理")
+            store.clearReady()
+            return false
+        }
+        if (manifest.versionCode <= OtaVerifier.currentVersionCode(context)) {
+            LogStore.i(TAG, "版本 ${manifest.versionCode} 已安装，清理残留安装包")
+            file.delete()
+            store.clearReady()
+            return false
+        }
+        _state.value = OtaState.Ready(file, manifest)
+        LogStore.i(TAG, "恢复待安装状态：${manifest.versionName}(${manifest.versionCode})")
+        return true
     }
 
     /** 下载目录（相对于 cacheDir）；P2 接安装器时要把它加进 file_paths.xml 才能用 FileProvider 分享 */
