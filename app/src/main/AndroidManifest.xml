@@ -57,10 +57,10 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".ui.LogActivity"
-            android:exported="false"
-            android:screenOrientation="portrait" />
+        <!--
+          日志页已移除（2026-10-28）：日志不再允许本地查看，点「日志」直接上报云端。
+          排查靠 debug 包的调试通道（files/runtime.log + DUMP 等命令）。
+        -->
 
         <!--
           无障碍服务。特点：

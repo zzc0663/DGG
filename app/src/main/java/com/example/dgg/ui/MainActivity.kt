@@ -3,6 +3,7 @@ package com.example.dgg.ui
 import android.Manifest
 import android.content.Intent
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.text.InputFilter
@@ -24,6 +25,10 @@ import com.example.dgg.data.Settings
 import com.example.dgg.data.SettingsStore
 import com.example.dgg.data.license.LicenseProvider
 import com.example.dgg.data.license.LicenseStatus
+import com.example.dgg.data.log.LogUploader
+import com.example.dgg.data.log.LogUploadReceipt
+import com.example.dgg.data.log.LogUploadState
+import com.example.dgg.data.log.RemoteLogUploadProvider
 import com.example.dgg.data.license.RemoteLicenseProvider
 import com.example.dgg.data.ota.OtaInstaller
 import com.example.dgg.data.ota.OtaManager
@@ -59,6 +64,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -142,6 +148,9 @@ class MainActivity : AppCompatActivity() {
         license = RemoteLicenseProvider(this)
         LogStore.i(TAG, "主界面创建，参数已加载（目标=${store.current.followTarget}，日上限=${store.current.dailyLimit}）")
 
+        // 日志上报要求日志必须落盘（release 也要），DebugChannel 只在 debug 包 attach 过
+        LogStore.attachFileSink(File(filesDir, LOG_FILE_NAME))
+
         // 调试通道的另一入口：服务连接回调在 HyperOS 上不保证触发，界面创建是可靠的兜底
         DebugChannel.startIfNeeded(this)
 
@@ -151,6 +160,7 @@ class MainActivity : AppCompatActivity() {
         setupActions()
         setupLicense()
         setupOta()
+        setupLogUpload()
         setupEngineObserver()
     }
 
@@ -806,16 +816,24 @@ class MainActivity : AppCompatActivity() {
         toast("已在后台下载 ${manifest.versionName}，可在通知栏查看进度")
     }
 
-    private fun formatBytes(bytes: Long): String =
-        if (bytes < 1024 * 1024) "${bytes / 1024} KB" else "%.1f MB".format(bytes / 1024.0 / 1024.0)
+    /**
+     * 字节数格式化。
+     *
+     * `< 1 KB` 必须走 B 分支：日志可能只有几百字节（刚启动就点上传），
+     * 原来的 `bytes / 1024` 会显示「0 KB」，用户会以为根本没传上去。
+     */
+    private fun formatBytes(bytes: Long): String = when {
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+        else -> "%.1f MB".format(bytes / 1024.0 / 1024.0)
+    }
 
     // ==================== 动作 ====================
 
     private fun setupActions() {
-        binding.tvLog.setOnClickListener {
-            LogStore.i(TAG, "打开运行日志")
-            startActivity(Intent(this, LogActivity::class.java))
-        }
+        // 「日志」不再是查看入口：点一下就把日志上传到云端，回一个编号给用户报障用。
+        // 本地查看已关闭（2026-10-28 要求），避免用户把日志截图外传或改文件。
+        binding.tvLog.setOnClickListener { uploadLogs() }
 
         binding.tvUnbind.setOnClickListener {
             uiScope.launch {
@@ -1013,7 +1031,7 @@ class MainActivity : AppCompatActivity() {
             "识别当前页面（只读，不发任何操作）",
             "搜索链路自检（首页 → 搜索 → 用户 tab）",
             "打开系统无障碍设置",
-            "查看运行日志"
+            "上传运行日志到云端"
         )
         AlertDialog.Builder(this)
             .setTitle("自检")
@@ -1022,11 +1040,80 @@ class MainActivity : AppCompatActivity() {
                     0 -> detectCurrentPage()
                     1 -> startFlow(SmokeFlow.build(), "自检流程已启动（只验定位，不关注任何人）")
                     2 -> openPermission(PermissionCardView.Kind.ACCESSIBILITY)
-                    else -> startActivity(Intent(this, LogActivity::class.java))
+                    else -> uploadLogs()
                 }
             }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    // ==================== 日志上报 ====================
+
+    private fun setupLogUpload() {
+        LogUploader.installProvider(RemoteLogUploadProvider())
+        uiScope.launch {
+            LogUploader.state.collect { renderLogUpload(it) }
+        }
+    }
+
+    /**
+     * 「日志」按钮 = 一键上报。
+     *
+     * 设计要点（用户明确要求：**不允许本地查看，点击就上传**）：
+     * - 不做二次确认：点了就传，减少一步；正文只取最近 512KB（见 [LogCollector.MAX_BYTES]）；
+     * - 结果必须回一个**编号**：用户报障时报这个号，客服才能在云端定位到这份日志；
+     * - 失败如实说失败，不静默重试（用户主动操作，静默等于骗人）。
+     */
+    private fun uploadLogs() {
+        if (LogUploader.state.value is LogUploadState.Uploading) {
+            toast("正在上传，请稍候")
+            return
+        }
+        LogStore.i(TAG, "点击「日志」→ 收集并上传到云端（本地查看已关闭）")
+        uiScope.launch {
+            LogUploader.upload(this@MainActivity).fold(
+                onSuccess = { receipt -> showUploadReceipt(receipt) },
+                onFailure = { error -> toast("日志上传失败：${error.message ?: "网络异常"}") }
+            )
+        }
+    }
+
+    private fun showUploadReceipt(receipt: LogUploadReceipt) {
+        val statusText = when (receipt.status) {
+            LogUploadReceipt.STATUS_QUEUED -> "已受理（排队入库）"
+            LogUploadReceipt.STATUS_FILTERED -> "已收到（被过滤，请联系客服）"
+            else -> "已入库"
+        }
+        val detail = buildString {
+            append("编号：").append(receipt.reportId).append('\n')
+            append("状态：").append(statusText).append('\n')
+            if (receipt.size > 0) append("大小：").append(formatBytes(receipt.size)).append('\n')
+            if (receipt.expiresAt > 0) {
+                append("云端保留至：").append(formatDateTime(receipt.expiresAt)).append('\n')
+            }
+            append("\n把编号告知客服即可定位这份日志。")
+        }
+        val builder = AlertDialog.Builder(this)
+            .setTitle("日志已上传")
+            .setMessage(detail)
+            .setPositiveButton("知道了", null)
+        // 服务端给了工单链接才显示入口：字段是可选的，没有就不摆一个点不动的按钮
+        receipt.ticketUrl?.let { url ->
+            builder.setNeutralButton("查看工单") { _, _ ->
+                runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                    .onFailure { toast("无法打开链接：$url") }
+            }
+        }
+        builder.show()
+    }
+
+    /** 「日志」按钮文案跟随上传状态：上传中变成「上传中…」，避免用户重复点 */
+    private fun renderLogUpload(state: LogUploadState) {
+        binding.tvLog.text = when (state) {
+            is LogUploadState.Uploading -> "上传中…"
+            else -> "日志"
+        }
+        binding.tvLog.isEnabled = state !is LogUploadState.Uploading
     }
 
     /**
@@ -1078,6 +1165,10 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "主界面"
+
+        /** 落盘日志文件名。与 DebugChannel 里的 CMD_FILE/LOG_FILE 同一目录，联调用同一个文件 */
+        private const val LOG_FILE_NAME = "runtime.log"
+
         private val TAB_NAMES = listOf("自动关注", "养号助手", "直播互动")
 
         private const val TAB_AUTO = 0

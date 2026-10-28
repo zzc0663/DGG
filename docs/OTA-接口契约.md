@@ -38,7 +38,7 @@
 ## 3. 接口 1：查询最新版本
 
 ```
-GET https://<host>/v1/ota/latest?app=dgg&channel=stable&versionCode=2&abi=arm64-v8a&deviceId=<ANDROID_ID>
+GET https://<host>/v1/ota/latest?app=dgg&channel=stable&versionCode=2&abi=arm64-v8a&deviceId=<sha256 64 位十六进制>
 ```
 
 ### 3.1 请求参数
@@ -49,7 +49,7 @@ GET https://<host>/v1/ota/latest?app=dgg&channel=stable&versionCode=2&abi=arm64-
 | `channel` | 是 | 当前客户端固定 `stable`。灰度放服务端按 `channel + deviceId` 自行决定 |
 | `versionCode` | 是 | **客户端当前已安装的 versionCode**，服务端据此判断"是否有更新" |
 | `abi` | 是 | `Build.SUPPORTED_ABIS.firstOrNull()`，如 `arm64-v8a`；可能是空串 |
-| `deviceId` | 是 | `Settings.Secure.ANDROID_ID`（**明文，未哈希**）。仅用于灰度与去重统计 |
+| `deviceId` | 是 | 64 位小写十六进制，`sha256("<ANDROID_ID>:<installUuid>:<packageName>")`（见 `DeviceIdentity`）。**不是明文 ANDROID_ID**，客户端不采集 IMEI / MAC / 序列号。仅用于灰度与去重统计；清数据或重装会变 |
 
 客户端不发 ETag（`OtaQuery.etag` 恒为 null），所以**不要依赖 `If-None-Match`**。
 如果服务端自己实现了 304，客户端也能正确处理（见 3.4）。
@@ -274,4 +274,4 @@ OTA 与授权是两条独立链路，互不阻塞：
 
 唯一交集：**客户端只在授权有效后自动检查更新**（手动点「升级」不受限）。
 所以服务端不必给 `/v1/ota/latest` 加鉴权 —— 它不泄露任何用户数据，
-`deviceId` 也只有 `ANDROID_ID` 这一项。
+`deviceId` 也只是一个 SHA-256 摘要（ANDROID_ID + 首启 UUID + 包名），不可反推。
