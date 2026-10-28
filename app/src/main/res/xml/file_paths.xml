@@ -3,4 +3,7 @@
     <cache-path
         name="logs"
         path="logs/" />
+    <cache-path
+        name="ota"
+        path="ota/" />
 </paths>

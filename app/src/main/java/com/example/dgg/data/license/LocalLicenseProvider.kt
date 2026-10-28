@@ -1,32 +1,43 @@
 package com.example.dgg.data.license
 
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.util.Calendar
 
 /**
- * 本地占位实现 —— **不做任何网络请求，也不假装做过**。
+ * 本地占位实现 —— **不发网络请求，也不假装做过**。
  *
- * 服务端未接入前，界面显示「已授权 / 本地占位」，到期时间为一个固定的演示值。
- * 这样既能让界面完整可用，又不会让人误判为真实计费链路已打通。
+ * 仅用于没有服务端时的界面演示。正式构建注入 RemoteLicenseProvider。
  */
 class LocalLicenseProvider : LicenseProvider {
 
-    override fun status(): LicenseStatus = LicenseStatus(
-        authorized = true,
-        expireAt = DEMO_EXPIRE_AT,
-        code = "LOCAL-DEMO-0000",
-        source = SOURCE
+    private val _state = MutableStateFlow(
+        LicenseStatus(
+            authorized = true,
+            expireAt = DEMO_EXPIRE_AT,
+            code = "LOCAL-DEMO-0000",
+            source = SOURCE,
+            remainingDays = 180,
+            message = "本地占位授权，未连接服务器"
+        )
     )
+    override val state: StateFlow<LicenseStatus> = _state.asStateFlow()
 
-    override fun activate(code: String): Result<LicenseStatus> =
+    override suspend fun initialize() = Unit
+
+    override suspend fun activate(code: String): Result<LicenseStatus> =
         Result.failure(IllegalStateException("服务端未接入：当前为本地占位实现，卡密校验不可用"))
 
-    override fun unbind(): Result<Unit> =
+    override suspend fun handshake(): Result<LicenseStatus> = Result.success(_state.value)
+
+    override suspend fun unbind(): Result<Unit> =
         Result.failure(IllegalStateException("服务端未接入：解绑需要在服务端清理设备绑定"))
 
     companion object {
         const val SOURCE = "LOCAL_PLACEHOLDER"
 
-        /** 与参考图保持一致的演示到期时间：2027-04-24 17:33:42 */
+        /** 演示到期时间：2027-04-24 17:33:42 */
         private val DEMO_EXPIRE_AT: Long = Calendar.getInstance().apply {
             set(2027, Calendar.APRIL, 24, 17, 33, 42)
             set(Calendar.MILLISECOND, 0)

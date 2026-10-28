@@ -6,8 +6,10 @@ import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
 import android.text.InputFilter
+import android.text.InputType
 import android.view.View
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -20,7 +22,13 @@ import com.example.dgg.data.LogStore
 import com.example.dgg.data.Settings
 import com.example.dgg.data.SettingsStore
 import com.example.dgg.data.license.LicenseProvider
-import com.example.dgg.data.license.LocalLicenseProvider
+import com.example.dgg.data.license.LicenseStatus
+import com.example.dgg.data.license.RemoteLicenseProvider
+import com.example.dgg.data.ota.OtaInstaller
+import com.example.dgg.data.ota.OtaManager
+import com.example.dgg.data.ota.OtaManifest
+import com.example.dgg.data.ota.OtaState
+import com.example.dgg.data.ota.RemoteOtaProvider
 import com.example.dgg.databinding.ActivityMainBinding
 import com.example.dgg.databinding.ContentAutoFollowBinding
 import com.example.dgg.engine.Actions
@@ -68,8 +76,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var store: SettingsStore
 
-    /** 服务端未接入，当前注入本地占位实现 */
-    private val license: LicenseProvider = LocalLicenseProvider()
+    /** 正式授权：服务端激活 + 启动握手；在 onCreate 里用 Activity Context 初始化 */
+    private lateinit var license: LicenseProvider
+    private var activationDialog: AlertDialog? = null
+    private var updateDialog: AlertDialog? = null
+    private var lastPromptedVersion = 0
+    private var lastOtaCheck = 0L
 
     private lateinit var tabs: List<TextView>
     private lateinit var indicators: List<View>
@@ -116,6 +128,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         store = SettingsStore.get(this)
+        license = RemoteLicenseProvider(this)
         LogStore.i(TAG, "主界面创建，参数已加载（目标=${store.current.followTarget}，日上限=${store.current.dailyLimit}）")
 
         // 调试通道的另一入口：服务连接回调在 HyperOS 上不保证触发，界面创建是可靠的兜底
@@ -125,7 +138,8 @@ class MainActivity : AppCompatActivity() {
         setupPermissionCards()
         bindAllSettings()
         setupActions()
-        renderLicense()
+        setupLicense()
+        setupOta()
         setupEngineObserver()
     }
 
@@ -138,6 +152,8 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         progressJob?.cancel()
         progressJob = null
+        activationDialog?.dismiss()
+        updateDialog?.dismiss()
         uiScope.cancel()
         super.onDestroy()
     }
@@ -481,31 +497,221 @@ class MainActivity : AppCompatActivity() {
 
     // ==================== 授权信息 ====================
 
-    private fun renderLicense() {
-        val status = license.status()
+    private fun setupLicense() {
+        uiScope.launch {
+            license.state.collect { status ->
+                renderLicense(status)
+                if (status.authorized) {
+                    maybeAutoCheckOta()
+                } else if (status.source == "REMOTE" &&
+                    status.message?.startsWith("未激活") == true
+                ) {
+                    showActivationDialog()
+                }
+            }
+        }
+        uiScope.launch { license.initialize() }
+    }
+
+    private fun renderLicense(status: LicenseStatus) {
         val c = binding.contentAuto
 
         c.tvLicenseStatus.text = when {
-            !status.authorized -> "未授权"
-            status.source == LocalLicenseProvider.SOURCE -> "已授权（本地占位）"
+            !status.authorized -> status.message ?: "未授权"
+            status.offline -> "已授权（离线模式）"
+            status.source == "LOCAL_PLACEHOLDER" -> "已授权（本地占位）"
             else -> "已授权"
         }
         c.tvLicenseStatus.setTextColor(
             ContextCompat.getColor(this, if (status.authorized) R.color.success_green else R.color.brand_red)
         )
         c.tvLicenseStatus.setTypeface(null, Typeface.BOLD)
+        c.tvLicenseStatus.setOnClickListener {
+            if (!license.state.value.authorized) showActivationDialog()
+        }
 
-        c.tvLicenseExpire.text = status.expireAt?.let { formatDateTime(it) } ?: "—"
+        c.tvLicenseExpire.text = status.expireAt?.let { millis ->
+            val days = status.remainingDays
+            if (days != null) "${formatDateTime(millis)}（剩余 $days 天）" else formatDateTime(millis)
+        } ?: "—"
         c.tvLicenseCode.text = status.code?.let { maskCode(it) } ?: "—"
+
+        if (status.offline && status.message != null) {
+            LogStore.i(TAG, "授权进入离线模式：${status.message}")
+        }
+        binding.btnStartService.isEnabled =
+            status.authorized || TaskEngine.progress.value.state.isActive
+    }
+
+    private fun showActivationDialog() {
+        if (isFinishing || activationDialog?.isShowing == true) return
+        val input = EditText(this).apply {
+            hint = "DGG-XXXXX-XXXXX-XXXXX-XXXXX"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+            filters = arrayOf(InputFilter.LengthFilter(64))
+            setSingleLine(true)
+            setPadding(28, 18, 28, 18)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("激活授权")
+            .setMessage("输入管理员提供的授权密钥。激活后本设备会绑定到该授权。")
+            .setView(input)
+            .setPositiveButton("激活", null)
+            .setNegativeButton("稍后", null)
+            .create()
+        dialog.setOnShowListener {
+            val button = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            button.setOnClickListener {
+                val code = input.text?.toString()?.trim().orEmpty()
+                if (code.isBlank()) {
+                    input.error = "请输入授权密钥"
+                    return@setOnClickListener
+                }
+                button.isEnabled = false
+                uiScope.launch {
+                    val result = license.activate(code)
+                    result.fold(
+                        onSuccess = {
+                            dialog.dismiss()
+                            toast("激活成功")
+                        },
+                        onFailure = { error ->
+                            button.isEnabled = true
+                            toast(error.message ?: "激活失败")
+                            LogStore.w(TAG, "激活失败：${error.message}")
+                        }
+                    )
+                }
+            }
+        }
+        dialog.setOnDismissListener { activationDialog = null }
+        activationDialog = dialog
+        dialog.show()
     }
 
     private fun formatDateTime(millis: Long): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(millis))
 
     private fun maskCode(code: String): String = when {
+        code.contains("•") -> code
         code.length <= 4 -> "••••"
         else -> code.take(4) + "••••" + code.takeLast(4)
     }
+
+    // ==================== OTA ====================
+
+    private fun setupOta() {
+        OtaManager.installProvider(RemoteOtaProvider(this))
+        uiScope.launch {
+            OtaManager.state.collect { renderOtaState(it) }
+        }
+        binding.tvUpdate.setOnClickListener { checkOta(manual = true) }
+    }
+
+    /** 授权可用后自动检查；6 小时内不重复，失败静默。 */
+    private fun maybeAutoCheckOta() {
+        val now = System.currentTimeMillis()
+        if (now - lastOtaCheck < OtaManager.MIN_CHECK_INTERVAL_MS) return
+        lastOtaCheck = now
+        uiScope.launch {
+            val manifest = OtaManager.check(this@MainActivity, manual = false)
+            if (manifest != null) showUpdatePrompt(manifest)
+        }
+    }
+
+    private fun checkOta(manual: Boolean) {
+        uiScope.launch {
+            val manifest = OtaManager.check(this@MainActivity, manual)
+            if (manifest != null) {
+                showUpdatePrompt(manifest)
+            } else if (manual) {
+                toast("已是最新版本，或暂时无法连接更新服务")
+            }
+        }
+    }
+
+    private fun renderOtaState(state: OtaState) {
+        when (state) {
+            is OtaState.Available -> {
+                binding.tvUpdate.visibility = View.VISIBLE
+                binding.tvUpdate.text = "升级 ${state.manifest.versionName}"
+                binding.tvUpdate.setOnClickListener { showUpdatePrompt(state.manifest) }
+            }
+
+            is OtaState.Downloading -> {
+                binding.tvUpdate.visibility = View.VISIBLE
+                val pct = if (state.total > 0) (state.downloaded * 100 / state.total) else 0
+                binding.tvUpdate.text = "下载 $pct%"
+            }
+
+            is OtaState.Ready -> {
+                binding.tvUpdate.visibility = View.VISIBLE
+                binding.tvUpdate.text = "安装 ${state.manifest.versionName}"
+                binding.tvUpdate.setOnClickListener {
+                    OtaInstaller.install(this, state.file).onFailure { toast(it.message ?: "安装失败") }
+                }
+            }
+
+            is OtaState.Failed -> {
+                binding.tvUpdate.visibility = View.VISIBLE
+                binding.tvUpdate.text = "重试升级"
+                binding.tvUpdate.setOnClickListener { checkOta(manual = true) }
+                LogStore.w(TAG, "OTA 失败：${state.message}")
+            }
+
+            else -> {
+                binding.tvUpdate.visibility = View.GONE
+                binding.tvUpdate.setOnClickListener { checkOta(manual = true) }
+            }
+        }
+    }
+
+    private fun showUpdatePrompt(manifest: OtaManifest) {
+        if (isFinishing || updateDialog?.isShowing == true) return
+        lastPromptedVersion = manifest.versionCode
+        val message = buildString {
+            append("新版本 ${manifest.versionName}（${manifest.versionCode}）")
+            if (manifest.size > 0) append("\n大小：${formatBytes(manifest.size)}")
+            if (manifest.changelog.isNotBlank()) {
+                append("\n\n")
+                append(manifest.changelog.take(800))
+            }
+            append("\n\n更新会重启 App；任务运行中请先停止任务。")
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("发现新版本")
+            .setMessage(message)
+            .setPositiveButton("立即更新") { _, _ -> downloadUpdate(manifest) }
+            .setNegativeButton("稍后", null)
+            .setNeutralButton("忽略此版本") { _, _ ->
+                OtaManager.ignoreVersion(this, manifest.versionCode)
+                binding.tvUpdate.visibility = View.GONE
+            }
+            .create()
+        dialog.setOnDismissListener { updateDialog = null }
+        updateDialog = dialog
+        dialog.show()
+    }
+
+    private fun downloadUpdate(manifest: OtaManifest) {
+        toast("开始下载 ${manifest.versionName}")
+        uiScope.launch {
+            OtaManager.downloadAndVerify(this@MainActivity, manifest).fold(
+                onSuccess = { file ->
+                    OtaInstaller.install(this@MainActivity, file).onFailure {
+                        toast(it.message ?: "安装包已下载，请点「安装更新」重试")
+                    }
+                },
+                onFailure = { error ->
+                    toast(error.message ?: "下载失败")
+                    LogStore.e(TAG, "OTA 下载失败：${error.message}")
+                }
+            )
+        }
+    }
+
+    private fun formatBytes(bytes: Long): String =
+        if (bytes < 1024 * 1024) "${bytes / 1024} KB" else "%.1f MB".format(bytes / 1024.0 / 1024.0)
 
     // ==================== 动作 ====================
 
@@ -516,14 +722,16 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.tvUnbind.setOnClickListener {
-            val result = license.unbind()
-            val message = result.exceptionOrNull()?.message ?: "已解绑"
-            LogStore.w(TAG, "解绑请求：$message")
-            AlertDialog.Builder(this)
-                .setTitle("解绑")
-                .setMessage(message)
-                .setPositiveButton("知道了", null)
-                .show()
+            uiScope.launch {
+                val result = license.unbind()
+                val message = result.exceptionOrNull()?.message ?: "已解绑当前设备，重新打开 App 可输入新密钥"
+                LogStore.w(TAG, "解绑请求：$message")
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("解绑")
+                    .setMessage(message)
+                    .setPositiveButton("知道了", null)
+                    .show()
+            }
         }
 
         binding.btnStartService.setOnClickListener {
@@ -602,6 +810,7 @@ class MainActivity : AppCompatActivity() {
             EngineState.PAUSED -> "继续"
             else -> "开始服务"
         }
+        binding.btnStartService.isEnabled = license.state.value.authorized || active
     }
 
     // ==================== 启动分发 ====================
@@ -613,6 +822,11 @@ class MainActivity : AppCompatActivity() {
      * 填完评论参数点开始，实际跑的是关注流程——参数全部无效，行为完全错配。
      */
     private fun confirmAndStart() {
+        if (!license.state.value.authorized) {
+            toast("请先激活授权")
+            showActivationDialog()
+            return
+        }
         when (currentTab) {
             TAB_AUTO -> confirmFollow()
             TAB_NURTURE -> showUnavailable(TAB_NAMES[TAB_NURTURE], "M4")
