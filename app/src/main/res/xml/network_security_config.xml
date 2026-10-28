@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  网络安全策略：默认禁止明文流量，唯一例外是回环地址。
+
+  为什么要留回环口子：云端 OTA 接口还没做，但下载链路必须能被验证。
+  联调方式是 `python -m http.server 8099` + `adb reverse tcp:8099 tcp:8099`，
+  手机访问 http://127.0.0.1:8099/xxx.apk 即可跑完 Range/续传/sha256 全套。
+
+  放行回环不削弱安全性：回环只能连到设备自身，且安装前还有「签名与当前应用逐字节一致」
+  这道校验兜底（见 OtaVerifier）。真实更新地址一律要求 https（OtaUrls.isAllowed）。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

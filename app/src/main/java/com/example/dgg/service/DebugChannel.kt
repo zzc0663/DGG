@@ -18,6 +18,10 @@ import com.example.dgg.engine.risk.Humanizer
 import com.example.dgg.util.ActiveWindow
 import com.example.dgg.util.NodeDumper
 import com.example.dgg.util.Texts
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
 
@@ -55,6 +59,12 @@ object DebugChannel {
     @Volatile
     private var started = false
 
+    /**
+     * OTA 联调命令（OTACHECK / OTADL）是挂起函数，不能在主线程 `execute()` 里直接跑。
+     * 用 IO 作用域异步执行，结果仍然只往 [LogStore] 写，命令通道保持"发完就返回"。
+     */
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
     fun startIfNeeded(context: Context) {
         if (started) return
         val debuggable = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
@@ -73,9 +83,11 @@ object DebugChannel {
             override fun run() {
                 runCatching {
                     if (cmdFile.isFile) {
-                        val cmd = cmdFile.readText().trim().uppercase(Locale.US)
+                        // 保留原始大小写：命令关键字统一转大写匹配，但**参数不能转**
+                        // （json 里的 url、sha256、中文文本都必须原样）
+                        val raw = cmdFile.readText().trim()
                         cmdFile.delete()
-                        execute(cmd, base)
+                        execute(raw, base)
                     }
                 }.onFailure { LogStore.w(TAG, "命令处理异常：${it.message}") }
                 handler.postDelayed(this, POLL_MS)
@@ -85,9 +97,12 @@ object DebugChannel {
         LogStore.i(TAG, "已开启，命令文件 ${cmdFile.absolutePath}")
     }
 
-    private fun execute(cmd: String, base: File) {
+    private fun execute(raw: String, base: File) {
         val dumpDir = File(base, "dump").apply { mkdirs() }
         val service = DggAccessibilityService.current
+        // 命令关键字大小写不敏感，但参数必须原样（json / url / sha256 / 中文都靠这个）
+        val cmd = raw.uppercase(Locale.US)
+        val payload = raw.indexOf(' ').let { if (it >= 0) raw.substring(it + 1).trim() else "" }
 
         when {
             cmd == "DUMP" -> {
@@ -193,7 +208,7 @@ object DebugChannel {
             cmd.startsWith("TEXT ") -> {
                 // 调试通道专用的中文输入：`adb shell input text` 不支持中文，
                 // 这里用无障碍 SET_TEXT 一次性写入第一个可编辑节点。
-                val text = cmd.removePrefix("TEXT ")
+                val text = payload
                 if (service == null || text.isBlank()) {
                     LogStore.w(TAG, "TEXT 失败：service=${service != null} 参数空")
                     return
@@ -229,6 +244,81 @@ object DebugChannel {
                     }
                 }
                 if (!done) LogStore.e(TAG, "TEXT 失败：页面上没有可编辑节点")
+            }
+
+            // ==================== OTA 联调（P0/P1 没有界面，靠这三条命令验证） ====================
+
+            cmd.startsWith("OTAJSON ") -> {
+                // 覆盖本地占位的 manifest，等价于"服务端返回了这条 JSON"
+                val file = File(base, com.example.dgg.data.ota.LocalOtaProvider.FILE_NAME)
+                runCatching { file.writeText(payload) }
+                    .onSuccess { LogStore.i(TAG, "OTAJSON 已写入 ${file.name}（${payload.length} 字符）") }
+                    .onFailure { LogStore.e(TAG, "OTAJSON 写入失败：${it.message}") }
+            }
+
+            cmd == "OTACHECK" -> {
+                if (service == null) {
+                    LogStore.e(TAG, "OTACHECK 失败：无障碍服务未连接（它只是被借来做 Context）")
+                    return
+                }
+                scope.launch {
+                    val manifest = com.example.dgg.data.ota.OtaManager.check(service, manual = true)
+                    LogStore.i(TAG, "OTACHECK 结果：${manifest?.let { "有新版本 ${it.versionName}(${it.versionCode})" } ?: "无更新"}")
+                }
+            }
+
+            cmd.startsWith("OTAVERIFY ") -> {
+                if (service == null) {
+                    LogStore.e(TAG, "OTAVERIFY 失败：无障碍服务未连接")
+                    return
+                }
+                val path = payload
+                val apk = File(path)
+                val current = com.example.dgg.data.ota.OtaVerifier.currentVersionCode(service)
+                val r = com.example.dgg.data.ota.OtaVerifier.verify(service, apk, current)
+                val text = when (r) {
+                    is com.example.dgg.data.ota.VerifyResult.Ok ->
+                        "通过：${r.versionName}(${r.versionCode})，当前 $current"
+                    is com.example.dgg.data.ota.VerifyResult.Rejected -> "拒绝：${r.reason}"
+                }
+                File(dumpDir, "verify.txt").writeText(text)
+                LogStore.i(TAG, "OTAVERIFY $path → $text")
+            }
+
+            cmd.startsWith("OTADL ") -> {
+                if (service == null) {
+                    LogStore.e(TAG, "OTADL 失败：无障碍服务未连接")
+                    return
+                }
+                val args = payload.split(Regex("\\s+")).filter { it.isNotEmpty() }
+                if (args.size < 2) {
+                    LogStore.e(TAG, "OTADL 用法：OTADL <url> <sha256>")
+                    return
+                }
+                val dir = File(service.cacheDir, com.example.dgg.data.ota.OtaManager.DIR_NAME)
+                val fileName = "dl-test.apk"
+                scope.launch {
+                    val downloaded = com.example.dgg.data.ota.OtaDownloader(dir)
+                        .download(args[0], args[1], fileName) { done, total ->
+                            if (total > 0 && done % (2 * 1024 * 1024) < 64 * 1024) {
+                                LogStore.d(TAG, "OTADL 进度 $done/$total")
+                            }
+                        }
+                    downloaded.fold(
+                        onSuccess = { f ->
+                            val v = com.example.dgg.data.ota.OtaVerifier.verify(
+                                service, f, com.example.dgg.data.ota.OtaVerifier.currentVersionCode(service)
+                            )
+                            val verdict = when (v) {
+                                is com.example.dgg.data.ota.VerifyResult.Ok ->
+                                    "校验通过 ${v.versionName}(${v.versionCode})"
+                                is com.example.dgg.data.ota.VerifyResult.Rejected -> "校验拒绝：${v.reason}"
+                            }
+                            LogStore.i(TAG, "OTADL 完成：${f.length()} 字节，$verdict")
+                        },
+                        onFailure = { LogStore.e(TAG, "OTADL 失败：${it.message}") }
+                    )
+                }
             }
 
             else -> LogStore.w(TAG, "未知命令：$cmd")
