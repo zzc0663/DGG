@@ -74,19 +74,21 @@ class FollowFromLiveFlow : Flow {
         )
 
         var followed = 0
-        var dryRounds = 0
         var reusedHits = 0
         var waitedRounds = 0
+        var waitedMsTotal = 0L
         val handled = HashSet<String>()
 
         /**
-         * 上一轮评论区**最底那一行**的文案（= 当时最新的一条评论）。
+         * 评论行文案 → **首次见到它的时刻**。
          *
-         * 直播间评论是自下往上堆的，所以「列表有没有推进到最新」只能靠「底行有没有换人」判断。
-         * 这是本轮新增的「追最新」锚点：每关注一个人要花 6 秒以上（点开资料卡 → 点关注 → 校验），
-         * 回来时列表很可能还停在刚才那一屏，不追就会一直从几分钟前的旧评论里挑人。
+         * 这是「列表有没有新评论进来」的唯一判据，跨轮保留（见 [scanOnce]）。
+         * 为什么不用「最底那一行换人了没」：真机日志证明这个信号不可靠——
+         * 底行会因为插入动画/节点复用短暂读不到（实测 9 行在一次采样里掉到 7 行），
+         * 于是锚点会在「最底行」和「倒数第二行」之间来回跳，既会误判成"已推进"，
+         * 也会在列表真的推进时判成"没动"。按"这一行我从没见过"判断，两种错都不会有。
          */
-        var anchor: String? = null
+        val seenRows = HashMap<String, Long>()
 
         /** 只有第一轮允许「首页→直播页签→进房」的自动导航，理由见主循环里的注释 */
         var firstEnsure = true
@@ -156,87 +158,29 @@ class FollowFromLiveFlow : Flow {
                 }
             }
 
-            // 追最新：等「列表底部那一行」换人，说明列表已经滚到了比上一轮更新的评论。
-            // **不能用滑动去滚**——实测在评论区里做 550px 纵向滑动会直接切到下一个直播间
-            // （主播从「毛里求斯黑猩猩」变成「迅猛龙特…」），短滑又不产生任何位移：
-            // 这套列表不可滚动，只能等它自己往上滚。
-            val latest = if (anchor != null) {
-                awaitNewestChanged(ctx, targets, anchor, WAIT_NEW_COMMENT_MS)
-            } else {
-                null
-            }
-            if (latest != null) {
-                if (latest != anchor) {
-                    waitedRounds++
-                    LogStore.d(TAG, "评论区已推进到新评论，按最新一屏采集")
-                } else {
-                    LogStore.w(
-                        TAG,
-                        "评论区 ${WAIT_NEW_COMMENT_MS}ms 内没有新评论（房间可能很安静），" +
-                            "退化为「当前屏最新处」取人"
-                    )
-                }
-                // 点击前把此刻的最新一行记为下一轮的基准（省掉一次多余的遍历）
-                anchor = latest
-            } else {
-                anchor = newestRow(ctx, targets)?.label
-            }
-
-            val candidates = collectCandidates(ctx, targets, store, handled)
-            if (candidates.isEmpty()) {
-                dryRounds++
-                // 两种「没候选」完全不同，不能用同一个上限：
-                // - 屏幕上**读得到评论行**，但行里的人全在本轮已处理名单里 → 只是这一屏的人挑完了，
-                //   应该耐心等新评论进来（安静房间等一两分钟是常态）；
-                // - 屏幕上**一行评论都读不到** → 定位失效或被浮层盖住，等下去没有意义。
-                val hasCommentRows = newestRow(ctx, targets) != null
-                val limit = if (hasCommentRows) MAX_IDLE_ROUNDS else MAX_DRY_ROUNDS
-                val hint = if (hasCommentRows) {
-                    "这一屏 ${handled.size} 人都已处理过，等新评论进来"
-                } else {
-                    "读不到评论行"
-                }
-                ctx.publish(message = "$hint（$dryRounds/$limit）")
-                if (dryRounds >= limit) {
-                    // 带上当前页面判定再报错，否则「采不到评论」这一个现象会指向两种完全不同的原因
-                    val detection = ctx.detector.detect()
-                    throw FlowAbortException(
-                        if (hasCommentRows) {
-                            "连续 $limit 轮都没有出现没关注过的新观众（这个直播间说话的人太少）。" +
-                                "可以换一个更热闹的直播间，或降低目标数量后重试。"
-                        } else {
-                            "连续 $limit 次读不到直播间评论，已停止。" +
-                                "当前页面判定 ${detection.page.name}（${detection.score}/${detection.threshold}）。" +
-                                if (detection.page == PageState.LIVE_ROOM) {
-                                    "人在直播间但读不到评论，多半是 live_comment_nickname / live_comment_line " +
-                                        "与当前抖音版本不匹配（见 docs/定位配置说明.md）"
-                                } else {
-                                    "已不在直播间（可能被弹窗盖住），请重新进入目标直播间再开始"
-                                }
-                        }
-                    )
-                }
-                // 刻意**不滑动**：抖音直播间里全屏上下滑是切换直播间，不是滚动评论列表，
-                // 一滑就可能离开你选的直播间（四组真机实验，见 docs/M2-直播间评论关注.md §12.2）。
-                // 直播评论本身在持续刷新，等着就行。
-                ctx.settle(COMMENT_WAIT_MS)
-                continue
-            }
-            dryRounds = 0
-
-            // 采集到候选说明刚才还在直播间；真正点下去之前再确认一次前台还在抖音。
-            // 用户可能刚好切走（回消息、被来电打断），那时坐标会落在别的应用上。
+            // 开始等新评论之前先确认前台还在抖音：等待可能长达几分钟，
+            // 用户切走（回消息、来电）时不该继续在这棵树上读，更不能等完再盲点。
             if (!LiveGuard.ensureDouyinForeground(ctx)) {
                 throw FlowAbortException("抖音已不在前台，且自动拉回失败，已停止（不会盲点）")
             }
 
+            // 追最新：**只认本轮首见的评论行**；没有新评论就等，绝不把窗口下滑到更旧的行。
+            // 不能靠滑动去滚（550px 会切到下一个直播间、120px 没有位移，见 docs/M2 §12.2），
+            // 所以「追最新」只能实现成「等列表自己滚到最新」——这里修的就是"等得够不够准"。
+            val scan = awaitFreshScan(ctx, targets, store, handled, seenRows) ?: return
+            if (scan.waitedMs > 2_000) {
+                waitedRounds++
+                waitedMsTotal += scan.waitedMs
+            }
+            val candidates = scan.candidates
+
             // 只在**最新的几个人**里挑，不再对整屏候选随机。
             //
-            // 之前是对全部候选 random()，屏幕上一屏能挂 9 条评论（实测 y 1195~2170，
-            // 覆盖好几分钟），关注完第一个之后经常又从几分钟前的旧评论里挑人，
-            // 观感就是「一直在补关注早就不在看的人」。
+            // 一屏能挂 9 条评论（实测 y 1398~2090，覆盖好几分钟），对整屏 random() 的结果
+            // 就是「关注完第一个之后一直在补关注几分钟前的人」。
             // candidates 已按「新→旧」排好序，前 NEWEST_WINDOW 个就是屏幕上最新的可用人；
-            // 若最新的几个都已关注过（被过滤掉了），列表自然往后顺延，不会卡住。
+            // 注意它**不会再往后顺延到旧行**——`awaitFreshScan` 只返回本轮首见的行，
+            // 首见的人若都处理过，就继续等新评论（安静房间等几分钟是常态，如实上报）。
             val window =
                 if (candidates.size > NEWEST_WINDOW) candidates.subList(0, NEWEST_WINDOW) else candidates
             // 加权而不是等概率：最新那一行权 3、第二 2、第三 1。
@@ -330,74 +274,150 @@ class FollowFromLiveFlow : Flow {
         LogStore.i(
             TAG,
             "本轮完成：关注 $followed 人，达目标 $target" +
-                "（直接复用采集节点 $reusedHits 次，等新评论 $waitedRounds 次）"
+                "（其中 $waitedRounds 轮为新评论等待过，累计 ${waitedMsTotal / 1000}s；" +
+                "直接复用采集节点 $reusedHits 次）"
         )
     }
 
     // ==================== 追最新 ====================
 
-    /** 评论区里的一行：整行文案 + 屏幕下边缘（y 越大越新） */
-    private class Row(val label: String, val bottom: Int)
+    /** 一次扫描的结论 */
+    private class Scan(
+        /** 屏上「合法评论行」的条数（含已处理/已关注的人，只用来判断"读不读得到评论"） */
+        val rows: Int,
+        /** 其中本轮**首见**的行数（= 列表确实有新评论进来的证据） */
+        val freshRows: Int,
+        /** 首见 + 未处理 + 未关注的人，按新→旧排序；空 = 还没有值得动手的新人 */
+        val candidates: List<Candidate>,
+        /** 为了等到这批新评论花了多久（0 = 上屏就是新的，没等） */
+        val waitedMs: Long = 0
+    )
 
     /**
-     * 取当前屏**最底（最新）**的那一行评论。
+     * 等到「本轮首见且还没处理过」的评论行。
      *
-     * 走快照在内存里比对，避免为了一个问题再跑一趟全树遍历。
-     * 这里刻意不套用任何业务过滤（已关注/黑名单），因为它的用途是「判断列表有没有动」，
-     * 锚点必须是屏幕上真实的最底一行，而不是「最底一个还没关注的人」。
+     * 这是整个「追最新」的核心，替换掉旧的「等底行换人 6 秒、等不到就降级随便挑」：
+     *
+     * - **判据换成行级首见**：只要屏幕上出现一行从没见过的文案就算列表前进了，
+     *   不再依赖"最底那一行"，因此不会因为底行读不到而抖动。
+     * - **没有新评论就一直等**，绝不把候选窗口下滑到更旧的行。真机日志证明
+     *   老实现 57% 的轮次走的是"降级按当前屏取人"，而那正是"关注到的都是几分钟前的人"的来源。
+     * - 等待期间每次只跑**一次采集**（本来就需要的），不再额外为"看一眼底行"多跑一趟全树。
+     *
+     * 三种退出：等到新人 / 读不到评论行连续 [MAX_DRY_ROUNDS] 次（定位失效）/ 停了。
+     * 房间安静到 [STALL_ABORT_MS] 都没有任何新评论时如实中止，不静默乱挑。
+     *
+     * @return null = 用户已停止（调用方直接 return，不要当成错误）
      */
-    private fun newestRow(ctx: FlowContext, targets: LiveTargets): Row? {
-        val target = targets.nickname ?: targets.line ?: return null
-        // ttl = 0：要的是「此刻」的界面，不能吃缓存
-        val facts = ctx.actions.snapshot(ttlMs = 0)
-        var best: Row? = null
-        for (f in facts) {
-            if (!ctx.actions.matchesFacts(f, target)) continue
-            val label = (f.text ?: f.desc)?.trim() ?: continue
-            if (label.isEmpty()) continue
-            val current = best
-            if (current == null || f.bottom > current.bottom) best = Row(label, f.bottom)
-        }
-        return best
-    }
-
-    /**
-     * 等评论区「滚到最新」。
-     *
-     * 判据是**最底那一行换人**：列表满屏时每行的 y 是固定的（旧行被顶掉、新行补在底部），
-     * 所以「y 变大」不是有效信号；而每一行的文案包含评论正文，换人必然换文案。
-     *
-     * @return 退出时看到的最新一行文案（null = 一直读不到评论行）；
-     *         与传入的 [anchor] 不同即代表列表已推进，相同代表超时未推进
-     */
-    private suspend fun awaitNewestChanged(
+    private suspend fun awaitFreshScan(
         ctx: FlowContext,
         targets: LiveTargets,
-        anchor: String,
-        timeoutMs: Long
-    ): String? {
-        val deadline = SystemClock.uptimeMillis() + timeoutMs
-        var last: String? = null
-        while (SystemClock.uptimeMillis() < deadline) {
-            if (ctx.stopped()) return last
-            val newest = newestRow(ctx, targets)
-            if (newest != null) {
-                last = newest.label
-                if (newest.label != anchor) {
+        store: FollowedStore,
+        handled: Set<String>,
+        seenRows: MutableMap<String, Long>
+    ): Scan? {
+        val startAt = SystemClock.uptimeMillis()
+        var emptyRounds = 0
+        var lastReportAt = 0L
+        var lastJumpAt = -JUMP_INTERVAL_MS
+        while (true) {
+            if (ctx.stopped()) return null
+            ctx.awaitResume()
+            ctx.guard()
+
+            val scan = scanOnce(ctx, targets, store, handled, seenRows)
+            if (scan.candidates.isNotEmpty()) {
+                val waited = SystemClock.uptimeMillis() - startAt
+                if (waited >= 2_000) {
                     LogStore.d(
                         TAG,
-                        "评论区底行已换：「${anchor.take(18)}」→「${newest.label.take(18)}」"
+                        "等到新评论：等了 ${waited / 1000}s，屏上 ${scan.rows} 行、" +
+                            "首见 ${scan.freshRows} 行、可用 ${scan.candidates.size} 人"
                     )
-                    return last
+                }
+                return Scan(scan.rows, scan.freshRows, scan.candidates, waited)
+            }
+
+            val waited = SystemClock.uptimeMillis() - startAt
+            if (scan.rows == 0) {
+                emptyRounds++
+                if (emptyRounds >= MAX_DRY_ROUNDS) {
+                    val detection = ctx.detector.detect()
+                    throw FlowAbortException(
+                        "连续 $MAX_DRY_ROUNDS 次读不到直播间评论，已停止。" +
+                            "当前页面判定 ${detection.page.name}（${detection.score}/${detection.threshold}）。" +
+                            if (detection.page == PageState.LIVE_ROOM) {
+                                "人在直播间但读不到评论，多半是 live_comment_line 与当前抖音版本不匹配" +
+                                    "（见 docs/定位配置说明.md）"
+                            } else {
+                                "已不在直播间（可能被弹窗盖住），请重新进入目标直播间再开始"
+                            }
+                    )
+                }
+            } else {
+                emptyRounds = 0
+            }
+
+            if (waited >= STALL_ABORT_MS) {
+                throw FlowAbortException(
+                    "这个直播间 ${STALL_ABORT_MS / 60_000} 分钟内没有出现新的评论" +
+                        "（屏上 ${scan.rows} 行都是已经处理过的人）。" +
+                        "换一个评论更热闹的直播间再开始——不会为了凑数去关注几分钟前的老观众"
+                )
+            }
+
+            // 评论区「停住」时的正解：抖音会在底部浮出一个「99+条新消息」按钮，
+            // 点它 = 让评论列表跳回最新。这是唯一的刷新入口——滑动是不行的（会切直播间），
+            // 而干等它自己恢复实测要 2 分钟以上（19:53 那次等了 123 秒）。
+            if (waited - lastJumpAt >= JUMP_INTERVAL_MS) {
+                val stuck = if (waited >= 2_000) "评论区停在旧位置 ${waited / 1000}s" else "评论区未跟进最新"
+                lastJumpAt = waited
+                val jumped = jumpToNewest(ctx)
+                if (jumped != null) {
+                    LogStore.i(TAG, "$stuck，已点「$jumped」回到最新")
+                    ctx.settle(JUMP_SETTLE_MS)
+                    continue
                 }
             }
-            delay(NEW_COMMENT_POLL_MS)
+
+            if (waited - lastReportAt >= REPORT_INTERVAL_MS) {
+                lastReportAt = waited
+                ctx.publish(
+                    message = if (scan.rows == 0) {
+                        "读不到评论行（$emptyRounds/$MAX_DRY_ROUNDS）"
+                    } else {
+                        "等新评论 ${waited / 1000}s（屏上 ${scan.rows} 行都已处理）"
+                    }
+                )
+            }
+            // 分片等待：既能被「暂停/停止」立刻打断，也顺带给采集节奏加抖动
+            ctx.settle(FRESH_POLL_MS)
         }
-        return last
     }
 
     /**
-     * 评论行可点的下边界：输入栏顶再往上留一点。
+     * 点掉抖音底部的「99+条新消息」浮标，让评论列表**跳回最新**。
+     *
+     * 为什么需要它（2026-10-28 真机实测，不求人直播间）：
+     * 点开一次评论行之后，评论区就**脱离底部**了——新评论不再上滚，全部堆在这个浮标后面，
+     * 屏幕上一直是同一批旧评论（实测 2 分钟内 6 行一字未变），要等它自己恢复得 2 分钟以上。
+     * 这正是「关注完一个就再也追不到最新评论」的直接原因。
+     *
+     * 这个浮标是抖音自己的"回到最新"按钮，普通点击，不涉及任何付费动作；
+     * 找不到它就返回 false（说明房间是真的安静），**绝不盲点坐标**。
+     */
+    private suspend fun jumpToNewest(ctx: FlowContext): String? {
+        for (text in NEW_MESSAGE_TEXTS) {
+            val pill = ctx.actions.find(Target(Target.Kind.TEXT_CONTAINS, text)) ?: continue
+            val label = ctx.actions.labelOf(pill) ?: text
+            LogStore.d(TAG, "发现新消息浮标：text=\"$label\"")
+            if (ctx.actions.tapNode(pill, "新消息按钮")) return label
+            LogStore.w(TAG, "点新消息浮标失败（$label）")
+        }
+        return null
+    }
+
+    /**
      *
      * 实测 40.8.0：输入框 `[72,2188][480,2302]`，最新一行评论底部约 2170。
      * 追最新之后挑中的就是最底部那几行，离输入栏只有十几像素，
@@ -488,15 +508,24 @@ class FollowFromLiveFlow : Flow {
     }
 
     /**
-     * 三级采集：配置的主路径 → 整行文本冒号切分兜底 → 过滤。
-     * 返回去重、过滤后的候选人（**带节点**，供点击前复用）；空列表代表「这一屏没有可用新人」。
+     * 采集一次：**单趟遍历**同时产出「屏上有几行评论」「其中几行是首见的」「可动手的新人」。
+     *
+     * 三级采集（配置的主路径 → 整行冒号切分兜底）保持不变，但「新鲜度」判定放在**行级**：
+     * 整行文案进 [seenRows]，第一次出现即视为「列表刚推进到它」。
+     *
+     * 为什么不是按人判断新鲜：已关注过的人又发了新评论，列表一样前进过，
+     * 这时应该继续按新一屏取人（而不是因为"这个人在名单里"就把整屏当成没动）。
+     *
+     * 候选**只收首见的行** —— 这就是「永远只关注刚说话的人」的实现点：
+     * 窗口不会再因为"最新的人都处理过了"而静默下滑到几分钟前的旧评论。
      */
-    private fun collectCandidates(
+    private fun scanOnce(
         ctx: FlowContext,
         targets: LiveTargets,
         store: FollowedStore,
-        handled: Set<String>
-    ): List<Candidate> {
+        handled: Set<String>,
+        seenRows: MutableMap<String, Long>
+    ): Scan {
         var raw: List<Pair<String, AccessibilityNodeInfo>> = emptyList()
         var source = "主路径"
         if (targets.nickname != null) {
@@ -513,21 +542,18 @@ class FollowFromLiveFlow : Flow {
         }
 
         val limit = rowBottomLimit(ctx, targets)
+        val now = SystemClock.uptimeMillis()
         val best = LinkedHashMap<String, Candidate>(raw.size)
+        var rows = 0
+        var freshRows = 0
         var skippedLow = 0
         var skippedThin = 0
+        var skippedSeen = 0
         for ((rawName, node) in raw) {
             val name = rawName.trim()
-            when {
-                !isValidNickname(name) -> continue
-                name in ctx.config.excludeNicknames -> continue
-                name in handled -> continue
-                store.isFollowed(name) -> continue
-            }
             val bounds = ctx.actions.boundsOf(node)
             val bottom = bounds.bottom
-            // 刚插入的行高度还没稳定（实测出现过 6px 的行），点下去落点会偏到相邻行或空白。
-            // 这种行不猜权重，直接等下一轮——它下一轮就是正常高度了。
+            // 刚插入的行高度还没稳定（实测出现过 6px 的行），点下去落点会偏到相邻行或空白
             if (bounds.height() < MIN_ROW_HEIGHT) {
                 skippedThin++
                 continue
@@ -537,27 +563,51 @@ class FollowFromLiveFlow : Flow {
                 skippedLow++
                 continue
             }
+            if (!isValidNickname(name)) continue
+
+            // 行级首见：整行文案（昵称 + 正文）第一次出现 = 列表刚推进到它
+            val label = ctx.actions.labelOf(node)?.trim().orEmpty()
+            val key = if (label.isEmpty()) name else label
+            val fresh = seenRows.put(key, now) == null
+            rows++
+            if (fresh) freshRows++
+
+            if (name in ctx.config.excludeNicknames) continue
+            if (name in handled) continue
+            if (store.isFollowed(name)) continue
+            if (!fresh) {
+                skippedSeen++
+                continue
+            }
             // 同一个人连发几条评论时保留**最新**那一条（bottom 最大），不是第一次出现的那条
             val existing = best[name]
             if (existing == null || bottom > existing.bottomY) {
                 best[name] = Candidate(name, node, bottom)
             }
         }
+
+        // seenRows 是长会话里的活体集合：一次会话可能见到上千条评论，只保留最近的一批
+        if (seenRows.size > SEEN_ROWS_CAP) {
+            val iterator = seenRows.keys.iterator()
+            repeat(seenRows.size - SEEN_ROWS_CAP / 2) { if (iterator.hasNext()) { iterator.next(); iterator.remove() } }
+        }
+
         // 从新到旧：调用方只取最前面几个，就能保证挑的是屏幕上最新的评论者
-        val filtered = best.values.sortedByDescending { it.bottomY }
+        val candidates = best.values.sortedByDescending { it.bottomY }
 
         if (raw.isEmpty()) {
             LogStore.w(TAG, "本轮未采集到任何评论文本（来源：$source），可能是定位配置不匹配或评论区为空")
-        } else {
+        } else if (freshRows > 0 || candidates.isNotEmpty()) {
             LogStore.d(
                 TAG,
-                "采集（$source）：原始 ${raw.size} 条 → 可用 ${filtered.size} 人" +
+                "扫描（$source）：原始 ${raw.size} → 评论行 $rows（首见 $freshRows）→ 可用新人 ${candidates.size}" +
                     "（已排除：本轮已处理 ${handled.size}、历史已关注 ${store.knownCount()}、" +
-                    "黑名单 ${ctx.config.excludeNicknames.size}、压输入栏 $skippedLow、行未成型 $skippedThin）" +
-                    "；最新 3 人 ${filtered.take(3).joinToString("、") { "${it.name}@y${it.bottomY}" }}"
+                    "黑名单 ${ctx.config.excludeNicknames.size}、压输入栏 $skippedLow、行未成型 $skippedThin、" +
+                    "非首见 $skippedSeen）" +
+                    "；最新 3 人 ${candidates.take(3).joinToString("、") { "${it.name}@y${it.bottomY}" }}"
             )
         }
-        return filtered
+        return Scan(rows, freshRows, candidates)
     }
 
     /** 整行形如「昵称：评论内容」，取冒号前的部分；没有冒号就不是评论行 */
@@ -730,36 +780,57 @@ class FollowFromLiveFlow : Flow {
     private companion object {
         const val TAG = "直播间关注"
 
-        const val MAX_COLLECT = 12
+        /** 一屏最多 9 行（真机实测 y 1398~2090），留些余量给批量插入的瞬间 */
+        const val MAX_COLLECT = 16
         const val MAX_BUTTON_SCAN = 8
 
-        /** 一行评论都读不到时的容忍轮数（定位失效 / 被浮层盖住，等下去没意义） */
+        /** 连续这么多次「一行评论都读不到」才判定定位失效（被浮层盖住 / 配置不匹配） */
         const val MAX_DRY_ROUNDS = 4
-
-        /**
-         * 读得到评论、但这一屏的人都处理过时的容忍轮数。
-         *
-         * 比 [MAX_DRY_ROUNDS] 宽得多是有意的：冷清直播间几十秒才有人说话是常态，
-         * 用 4 轮（约 30 秒）就中止会让用户误以为「脚本老是自己停」。
-         */
-        const val MAX_IDLE_ROUNDS = 12
 
         /**
          * 只在最新的这么多个**可用**候选里随机挑人。
          *
-         * 一屏能挂 9 条评论（实测 y 1195~2170，覆盖好几分钟），整屏随机会让后半程
+         * 一屏能挂 9 条评论（实测 y 1398~2090，覆盖好几分钟），整屏随机会让后半程
          * 一直在补关注几分钟前的人。取 3 既保证「挑的是刚说话的」，也保留随机性。
+         *
+         * 注意：与旧实现的区别是**不再往下顺延**——这里只装本轮首见的行，
+         * 首见的人若都已处理过，`awaitFreshScan` 会继续等新评论，而不是退到更旧的行。
          */
         const val NEWEST_WINDOW = 3
 
         /**
-         * 等「评论区底部换行」的超时。
+         * 等新评论时的采样间隔。
          *
-         * 热闹的直播间 1 秒内就会有新评论，等待几乎不花时间；
-         * 冷清房间没人说话时不该一直干等，6 秒后降级为「当前屏最新处」取人。
+         * 一次全树遍历在这台真机上约 1.4s，间隔比它短没有意义（旧的 300ms 实际是 1.7s 一刀）；
+         * 再叠加 `settle` 的抖动，实际约 2s 一次，和评论插入速度同量级。
          */
-        const val WAIT_NEW_COMMENT_MS = 6_000L
-        const val NEW_COMMENT_POLL_MS = 300L
+        const val FRESH_POLL_MS = 800L
+
+        /**
+         * 完全没有新评论时的等待上限。
+         *
+         * 不做「等不到就挑当前屏」的降级（那正是"关注到的都是几分钟前的人"的来源），
+         * 但也不能无限等：5 分钟还没有任何新行，说明这个房间确实没人说话，如实中止并提示换房。
+         */
+        const val STALL_ABORT_MS = 5 * 60_000L
+
+        /** 等待期间往悬浮窗/通知栏上报的间隔（每 2 秒刷一次太吵） */
+        const val REPORT_INTERVAL_MS = 5_000L
+
+        /** 首见行文案的容量上限：长会话里评论会累积上千条，只留最近的一批 */
+        const val SEEN_ROWS_CAP = 600
+
+        /**
+         * 抖音「评论区脱离底部」时浮出来的回到最新按钮文案（40.8.0 实测 `99+条新消息`）。
+         * 用 contains 匹配是因为数字会变（`3条新消息` / `99+条新消息`）。
+         */
+        val NEW_MESSAGE_TEXTS = listOf("条新消息", "回到最新")
+
+        /** 两次点「新消息」之间的最小间隔：点完给列表时间跳过去，别连点 */
+        const val JUMP_INTERVAL_MS = 12_000L
+
+        /** 点完「新消息」后等列表跳到底部的动画 */
+        const val JUMP_SETTLE_MS = 1_200L
 
         /** 评论行下边界 = 输入栏顶 - 这个余量（实测最新一行底部 2170、输入栏顶 2188） */
         const val ROW_LIMIT_MARGIN = 8
@@ -815,7 +886,9 @@ class FollowFromLiveFlow : Flow {
         const val MAX_NICK_LENGTH = 24
 
         val SYSTEM_MESSAGE_HINTS = listOf(
-            "来了", "关注了主播", "送出", "点亮", "升级", "加入粉丝团", "为主播", "分享了直播间"
+            "来了", "关注了主播", "送出", "点亮", "升级", "加入粉丝团", "为主播", "分享了直播间",
+            // 评论区跳回最新时会短暂插一行「加载中……」占位，实测被当成昵称收进了候选
+            "加载中"
         )
 
         /**

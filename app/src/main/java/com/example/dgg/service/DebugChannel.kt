@@ -1,11 +1,13 @@
 package com.example.dgg.service
 
+import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.graphics.Path
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.dgg.data.LogStore
 import com.example.dgg.data.SettingsStore
@@ -15,6 +17,7 @@ import com.example.dgg.engine.PageDetector
 import com.example.dgg.engine.risk.Humanizer
 import com.example.dgg.util.ActiveWindow
 import com.example.dgg.util.NodeDumper
+import com.example.dgg.util.Texts
 import java.io.File
 import java.util.Locale
 
@@ -42,6 +45,12 @@ object DebugChannel {
     private const val CMD_FILE = "debug_cmd"
     private const val LOG_FILE = "runtime.log"
     private const val POLL_MS = 800L
+
+    /** WATCH 采样间隔：一次全树遍历在这台真机上约 1.4s，2s 间隔才不会自己拖垮自己 */
+    private const val WATCH_STEP_MS = 2_000L
+
+    /** WATCH 每个采样点最多打印的行数（屏幕上一屏实测 9 行） */
+    private const val WATCH_MAX_ROWS = 14
 
     @Volatile
     private var started = false
@@ -168,6 +177,19 @@ object DebugChannel {
                 LogStore.i(TAG, "SWIPE (${v[0]},${v[1]})→(${v[2]},${v[3]})：${service.dispatchGesture(g, null, null)}")
             }
 
+            cmd.startsWith("WATCH ") -> {
+                // 评论区「追最新」取证专用：按固定间隔采样「所有含评论特征的节点」，
+                // 记录 top/bottom/高度/是否压输入栏，输出一条时间线。
+                // 纯读取，不产生任何手势——用来区分「列表其实在动、我们的判据瞎了」
+                // 和「列表真的被冻住了」这两种完全不同的故障。
+                val secs = cmd.removePrefix("WATCH ").trim().toIntOrNull() ?: 60
+                if (service == null) {
+                    LogStore.e(TAG, "WATCH 失败：无障碍服务未连接")
+                    return
+                }
+                watchComments(service, dumpDir, secs.coerceIn(5, 300))
+            }
+
             cmd.startsWith("TEXT ") -> {
                 // 调试通道专用的中文输入：`adb shell input text` 不支持中文，
                 // 这里用无障碍 SET_TEXT 一次性写入第一个可编辑节点。
@@ -211,5 +233,84 @@ object DebugChannel {
 
             else -> LogStore.w(TAG, "未知命令：$cmd")
         }
+    }
+
+    /**
+     * `WATCH <秒>`：评论区采样时间线。
+     *
+     * 为什么必须是它：直播间画面持续动画，`uiautomator dump` 等不到 idle，
+     * 而「列表到底有没有前进」正是本次要判定的事实。这里每 [WATCH_STEP_MS]
+     * 用快照采一次「所有命中 live_comment_line / live_comment_nickname 的可见节点」，
+     * 按 bottom 从大到小输出，并标出：
+     *
+     * - `over=Y`  —— 该行压到了输入栏上方（`collectCandidates` 会把它过滤掉，
+     *   但旧版 `newestRow` 没有——这正是「锚点被钉死」的嫌疑人）；
+     * - `nick=`   —— 按冒号切出来的昵称，`-` 表示这压根不是一行评论。
+     *
+     * 整个过程只读，不点、不滑、不按返回。输出 `files/dump/watched.txt`。
+     */
+    private fun watchComments(service: AccessibilityService, dumpDir: File, totalSec: Int) {
+        val actions = Actions(service, Humanizer(0))
+        val config = LocatorConfigLoader.load(service, forceReload = true)
+        val lineTarget = config.target("live_comment_line")
+        val nickTarget = config.target("live_comment_nickname")
+        val inputTarget = config.target("comment_input")
+        if (lineTarget == null && nickTarget == null) {
+            LogStore.e(TAG, "WATCH 失败：配置里没有 live_comment_line / live_comment_nickname")
+            return
+        }
+
+        val outFile = File(dumpDir, "watched.txt")
+        val sb = StringBuilder(1 shl 14)
+        val samples = ((totalSec * 1_000L) / WATCH_STEP_MS).toInt().coerceIn(1, 200)
+        val startAt = SystemClock.uptimeMillis()
+        val handler = Handler(Looper.getMainLooper())
+
+        val job = object : Runnable {
+            var k = 0
+            override fun run() {
+                runCatching {
+                    val facts = actions.snapshot(ttlMs = 0)
+                    // 输入栏顶 = 评论行可点的下边界（与 FollowFromLiveFlow.rowBottomLimit 同口径）
+                    val limit = inputTarget?.let { t ->
+                        facts.filter { actions.matchesFacts(it, t) && it.top > 0 }
+                            .map { it.top }
+                            .minOrNull()
+                    } ?: -1
+                    val rows = facts.filter { f ->
+                        (lineTarget != null && actions.matchesFacts(f, lineTarget)) ||
+                            (nickTarget != null && actions.matchesFacts(f, nickTarget))
+                    }.sortedByDescending { it.bottom }
+
+                    val elapsed = (SystemClock.uptimeMillis() - startAt) / 1_000
+                    sb.append('#').append(k).append(" t=").append(elapsed).append("s")
+                        .append(" nodes=").append(facts.size)
+                        .append(" limit=").append(limit)
+                        .append(" rows=").append(rows.size).append('\n')
+                    rows.take(WATCH_MAX_ROWS).forEach { f ->
+                        val label = (f.text ?: f.desc)?.replace('\n', ' ') ?: ""
+                        sb.append("   [").append(f.top).append(',').append(f.bottom).append("] h=")
+                            .append(f.bottom - f.top)
+                            .append(if (limit > 0 && f.bottom > limit) " over=Y" else " over=n")
+                            .append(" nick=").append((Texts.beforeColon(label) ?: "-").take(14))
+                            .append(" | ").append(label.take(30)).append('\n')
+                    }
+                    outFile.writeText(sb.toString())
+                    LogStore.d(
+                        TAG,
+                        "WATCH #$k rows=${rows.size} bottom=${rows.firstOrNull()?.bottom} " +
+                            "top=${rows.firstOrNull()?.top}"
+                    )
+                }.onFailure { LogStore.w(TAG, "WATCH 采样异常：${it.message}") }
+                k++
+                if (k < samples) {
+                    handler.postDelayed(this, WATCH_STEP_MS)
+                } else {
+                    LogStore.i(TAG, "WATCH 完成：$samples 次采样，输出 files/dump/watched.txt")
+                }
+            }
+        }
+        LogStore.i(TAG, "WATCH 开始：${totalSec}s，每 ${WATCH_STEP_MS}ms 一次（纯读取，不产生手势）")
+        handler.postDelayed(job, 300L)
     }
 }
