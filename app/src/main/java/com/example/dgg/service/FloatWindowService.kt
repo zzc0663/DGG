@@ -65,6 +65,12 @@ class FloatWindowService : Service() {
     private var job: Job? = null
     private var idleJob: Job? = null
 
+    /** 窗口存续期间「盯设置」的轮询任务（见 [startSettingsWatch]） */
+    private var syncJob: Job? = null
+
+    /** 上一次 render 时用的目标数，用来发现设置被别处改过；-1 表示还没画过 */
+    private var lastRenderedTarget = -1
+
     /** 只在见到过活动态之后才允许因终态做收尾，避免收到初始 IDLE 就自杀 */
     @Volatile
     private var sawActive = false
@@ -151,6 +157,8 @@ class FloatWindowService : Service() {
         params = lp
         setExpanded(false, animate = false)
         render(TaskEngine.progress.value)
+        // 窗口在就要盯设置：胶囊/面板上的目标数必须跟着参数页走（见 startSettingsWatch）
+        startSettingsWatch()
         LogStore.i(TAG, "悬浮窗已创建 @ (${lp.x}, ${lp.y})")
     }
 
@@ -488,13 +496,24 @@ class FloatWindowService : Service() {
         b.floatDot.setBackgroundResource(dot)
         b.floatDotPanel.setBackgroundResource(dot)
 
-        b.floatStatus.text = shortStatus(progress)
+        // 分母取**用户当前设置**，不取 progress.target。
+        // progress.target 是流程启动时（以及上一轮 publish 时）冻结的快照：用户在面板上
+        // 「设置关注」改了目标数，这个字段不会跟着变，界面上就是「输入人数后毫无变化」
+        // （2026-10-29 真机复现：改成 300、点确定，大号计数仍是 0/200）。
+        //
+        // 但 progress.target == 0 是**流程明确声明「没有总量目标」**（直播互动、养号都这么发），
+        // 这时只能显示纯计数，不能拿关注目标凑个分母出来。
+        val target = if (progress.target > 0) SettingsStore.get(this).current.followTarget else 0
+
+        b.floatStatus.text = shortStatus(progress, target)
         b.floatState.text = progress.state.label
+        // 按钮上直接带出当前目标值：即使计数还没刷新，用户也能立刻确认改动进去了
+        b.floatSetTarget.text = if (target > 0) "设置 $target" else "设置关注"
 
         val label = progress.counterLabel.ifBlank { "已关注" }
         b.floatCounterLabel.text = label
         b.floatCounter.text = when {
-            progress.target > 0 -> "${progress.followed}/${progress.target}"
+            target > 0 -> "${progress.followed}/$target"
             progress.followed > 0 -> "${progress.followed}"
             else -> "—"
         }
@@ -515,12 +534,53 @@ class FloatWindowService : Service() {
         b.floatToggle.visibility = if (active) View.VISIBLE else View.GONE
         b.floatToggle.text = if (progress.state == EngineState.PAUSED) "继续" else "暂停"
         b.floatFinish.text = if (active) "结束" else "关闭"
+
+        lastRenderedTarget = target
     }
 
-    /** 胶囊很窄，只放最关键的三段：状态、进度 */
-    private fun shortStatus(progress: EngineProgress): String = buildString {
+    /**
+     * 窗口存续期间盯一眼设置。
+     *
+     * 「目标关注数量」在三个地方都能改：悬浮面板、主界面参数、以及下次启动时读设置。
+     * 本服务拿不到 SharedPreferences 的变更通知，不主动对一次就会出现
+     * 「面板上还写着 300、参数页里已经是 150」的互相打脸。
+     *
+     * 收起态也要盯：胶囊上就挂着 `状态 0/目标数`，那是用户唯一能看到的进度，
+     * 显示旧值同样是在骗人。读的是 SharedPreferences 的内存缓存，1 秒一次的开销可以忽略，
+     * 且只有值真的变了才重画，不会白刷 TextView。
+     */
+    private fun startSettingsWatch() {
+        if (syncJob != null) return
+        syncJob = scope.launch {
+            while (true) {
+                delay(SETTINGS_WATCH_MS)
+                val p = TaskEngine.progress.value
+                val shown = if (p.target > 0) {
+                    SettingsStore.get(this@FloatWindowService).current.followTarget
+                } else {
+                    0
+                }
+                if (shown != lastRenderedTarget) {
+                    LogStore.d(TAG, "检测到目标数在别处被改为 $shown，刷新悬浮窗")
+                    render(p)
+                }
+            }
+        }
+    }
+
+    private fun stopSettingsWatch() {
+        syncJob?.cancel()
+        syncJob = null
+    }
+
+    /**
+     * 胶囊很窄，只放最关键的三段：状态、进度。
+     *
+     * [target] 由 [render] 从当前设置传进来（不是 `progress.target`，理由见 render 里的注释）。
+     */
+    private fun shortStatus(progress: EngineProgress, target: Int): String = buildString {
         append(progress.state.label)
-        if (progress.target > 0) append(" ${progress.followed}/${progress.target}")
+        if (target > 0) append(" ${progress.followed}/$target")
         else if (progress.followed > 0) append(" ${progress.followed}")
         if (progress.state == EngineState.RUNNING && progress.stepTotal > 0) {
             append(" · ${progress.stepIndex}/${progress.stepTotal}")
@@ -534,6 +594,7 @@ class FloatWindowService : Service() {
         job = null
         idleJob?.cancel()
         idleJob = null
+        stopSettingsWatch()
         scope.cancel()
         binding?.let { b -> runCatching { windowManager.removeView(b.root) } }
         binding = null
@@ -550,6 +611,9 @@ class FloatWindowService : Service() {
 
         /** 「已关人数」名单最多展示条数（全量在日志里） */
         private const val MAX_NAMES_SHOWN = 40
+
+        /** 悬浮窗「盯设置」的轮询间隔。只在值真的变了才重画，所以 1 秒一次几乎没有代价 */
+        private const val SETTINGS_WATCH_MS = 1_000L
 
         fun start(context: Context) {
             val intent = Intent(context, FloatWindowService::class.java)

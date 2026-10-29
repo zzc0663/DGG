@@ -167,7 +167,12 @@ class FollowFromLiveFlow : Flow {
             // 追最新：**只认本轮首见的评论行**；没有新评论就等，绝不把窗口下滑到更旧的行。
             // 不能靠滑动去滚（550px 会切到下一个直播间、120px 没有位移，见 docs/M2 §12.2），
             // 所以「追最新」只能实现成「等列表自己滚到最新」——这里修的就是"等得够不够准"。
-            val scan = awaitFreshScan(ctx, targets, store, handled, seenRows) ?: return
+            val scan = awaitFreshScan(
+                ctx, targets, store, handled, seenRows, lastSeenTargetSetting, lastSeenDailyLimit
+            ) ?: return
+            // 等待期间用户改了目标数/上限：回到循环顶部，那里会重读设置并刷新目标，
+            // 调小到已达标也会立刻结束。不能把这次"空扫描"当成"没新评论"继续等。
+            if (scan.settingsChanged) continue
             if (scan.waitedMs > 2_000) {
                 waitedRounds++
                 waitedMsTotal += scan.waitedMs
@@ -263,8 +268,14 @@ class FollowFromLiveFlow : Flow {
                         LogStore.i(TAG, "到达休息点（每 ${settings.restAfterN} 个），休息 ${settings.restSeconds}s")
                         ctx.settle(settings.restSeconds * 1_000L)
                     } else {
-                        // 间隔可能长达 60 分钟：分片等待，暂停/停止才收得到
-                        ctx.settleLong(settings.scanIntervalMs, capMs = Settings.MAX_SCAN_MS)
+                        // 间隔可能长达 60 分钟：分片等待，暂停/停止才收得到。
+                        // 每片顺便看一眼设置：用户在等待期间改了目标数就提前结束，
+                        // 不然他要等满这一小时才看到改动生效。
+                        ctx.settleLong(settings.scanIntervalMs, capMs = Settings.MAX_SCAN_MS) {
+                            val now = SettingsStore.get(ctx.appContext).current
+                            now.followTarget != lastSeenTargetSetting ||
+                                now.dailyLimit != lastSeenDailyLimit
+                        }
                     }
                 }
             }
@@ -290,7 +301,13 @@ class FollowFromLiveFlow : Flow {
         /** 首见 + 未处理 + 未关注的人，按新→旧排序；空 = 还没有值得动手的新人 */
         val candidates: List<Candidate>,
         /** 为了等到这批新评论花了多久（0 = 上屏就是新的，没等） */
-        val waitedMs: Long = 0
+        val waitedMs: Long = 0,
+        /**
+         * true = 这次返回不是因为"等到了人/等不下去"，而是**等待期间用户改了目标设置**。
+         *
+         * 调用方必须 `continue` 回到主循环重读设置，不能把空候选当成"房间安静"继续等。
+         */
+        val settingsChanged: Boolean = false
     )
 
     /**
@@ -314,7 +331,11 @@ class FollowFromLiveFlow : Flow {
         targets: LiveTargets,
         store: FollowedStore,
         handled: Set<String>,
-        seenRows: MutableMap<String, Long>
+        seenRows: MutableMap<String, Long>,
+        /** 进入等待时的「目标数」设置快照，用来发现等待期间用户改过它 */
+        watchTarget: Int,
+        /** 同上，每日上限 */
+        watchDailyLimit: Int
     ): Scan? {
         val startAt = SystemClock.uptimeMillis()
         var emptyRounds = 0
@@ -336,6 +357,26 @@ class FollowFromLiveFlow : Flow {
                     )
                 }
                 return Scan(scan.rows, scan.freshRows, scan.candidates, waited)
+            }
+
+            // 等待期间用户改了目标数/上限就立刻回主循环。
+            // 不做这件事的话，「等新评论」最长能等 STALL_ABORT_MS（5 分钟），
+            // 用户在这期间改设置完全没反应，观感就是「输入人数后没有变化」
+            // （2026-10-29 真机反馈）。这里只比字段，不额外遍历界面，开销可忽略。
+            val fresh = SettingsStore.get(ctx.appContext).current
+            if (fresh.followTarget != watchTarget || fresh.dailyLimit != watchDailyLimit) {
+                LogStore.i(
+                    TAG,
+                    "等待新评论期间目标设置变化（目标 $watchTarget→${fresh.followTarget}、" +
+                        "上限 $watchDailyLimit→${fresh.dailyLimit}），回到主循环重新读取"
+                )
+                return Scan(
+                    scan.rows,
+                    scan.freshRows,
+                    emptyList(),
+                    SystemClock.uptimeMillis() - startAt,
+                    settingsChanged = true
+                )
             }
 
             val waited = SystemClock.uptimeMillis() - startAt

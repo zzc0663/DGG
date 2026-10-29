@@ -112,12 +112,16 @@ class FlowContext(
      *              养号的"停留时长"**必须传 false**：调用方已经用 `humanizer.longIn(min,max)`
      *              掷过骰了，这里再抖一次就成了「随机叠随机」——实际区间会溢出去，
      *              日志上写"1.5~4 秒"而实测到 5 秒，排查时会以为随机数坏了。
+     * @param shouldInterrupt 每片结束时问一次，返回 true 就提前结束等待。
+     *              给「间隔可设到 1 小时」的场景用：用户在等待期间把目标数调小，
+     *              不该让他在原地等满这一小时才看到效果。
      */
     suspend fun settleLong(
         baseMs: Long,
         capMs: Long = Long.MAX_VALUE,
         chunkMs: Long = 1_000L,
-        jitter: Boolean = true
+        jitter: Boolean = true,
+        shouldInterrupt: (() -> Boolean)? = null
     ) {
         var left = (if (jitter) humanizer.delayMs(baseMs) else baseMs.coerceAtLeast(1L)).coerceAtMost(capMs)
         var sincePublish = 0L
@@ -130,6 +134,7 @@ class FlowContext(
             // 未暂停时立即返回；暂停期间挂起在这里，恢复后接着等
             awaitResume()
             if (stopped()) return
+            if (shouldInterrupt?.invoke() == true) return
             if (sincePublish >= PUBLISH_EVERY_MS && left > 0) {
                 sincePublish = 0
                 publish(message = "等待下次扫描，还有 ${left / 1000}s")

@@ -173,6 +173,12 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         // 从系统设置页返回后必须重新读一次，否则用户授权了却仍显示未授权
         val state = refreshPermissionState()
+        // 悬浮面板上也能改「目标关注数量 / 每日上限」，而本界面的输入框只在 onCreate 绑定一次。
+        // 不同步的话两个数字会打架：用户从抖音回来看到旧值，点一下再失焦，
+        // bindRangedIntField 的失焦回调还会把旧值写回去，把刚才在面板上设的值覆盖掉。
+        syncEditableSettings()
+        // 状态条的分母同样依赖设置值，设置变了要重画一次（collect 只在引擎状态变化时触发）
+        renderEngine(TaskEngine.progress.value)
         // 恢复向导：刚从设置页回来 → 推进到下一项（每项只跳一次，避免在设置页之间来回打转）
         if (pendingRestore.isNotEmpty()) {
             advanceRestore(skipCurrent = true)
@@ -180,6 +186,25 @@ class MainActivity : AppCompatActivity() {
         }
         // 权限被升级/重装/系统清理重置时，主动喊一声——这几个权限没了应用是静默残废的
         warnIfPermissionsLost(state)
+    }
+
+    /**
+     * 把界面输入框回填成 [SettingsStore] 的当前值。
+     *
+     * 覆盖的是「可能在别处被改」的数字项：目标关注数量、每日上限（悬浮面板的「设置关注」改前者）。
+     * 只回填**没有焦点且内容不同**的框——用户正在某个框里打字时不能抢他的输入。
+     */
+    private fun syncEditableSettings() {
+        val s = store.current
+        syncIntField(binding.contentAuto.etFollowTarget, s.followTarget)
+        syncIntField(binding.contentAuto.etDailyLimit, s.dailyLimit)
+    }
+
+    private fun syncIntField(edit: EditText, value: Int) {
+        if (edit.hasFocus()) return
+        if (edit.text?.toString()?.toIntOrNull() == value) return
+        edit.setText(value.toString())
+        edit.setSelection(edit.text?.length ?: 0)
     }
 
     override fun onDestroy() {
@@ -380,6 +405,9 @@ class MainActivity : AppCompatActivity() {
         bindRangedIntField(c.etFollowTarget, s.followTarget, followMin, followMax) { v ->
             store.edit { it.copy(followTarget = v) }
             LogStore.i(TAG, "目标关注数量 = $v")
+            // 状态条上的分母就是它：不在这里重画，改完的数字要等下一次引擎状态变化才出现，
+            // 观感就是「改了没反应」（悬浮面板的「设置关注」同理，那边已改成直接读设置）
+            renderEngine(TaskEngine.progress.value)
         }
         bindRangedIntField(c.etDailyLimit, s.dailyLimit, followMin, followMax) { v ->
             store.edit { it.copy(dailyLimit = v) }
@@ -981,7 +1009,15 @@ class MainActivity : AppCompatActivity() {
             progress.state == EngineState.ERROR
 
         binding.engineStatusBar.visibility = if (active || needAttention) View.VISIBLE else View.GONE
-        binding.tvEngineStatus.text = progress.brief()
+        // 分母取**当前设置**：progress.target 是任务启动瞬间的快照，用户在悬浮面板上改了
+        // 「设置关注」它不会跟着变，状态条就一直停在旧数字上（2026-10-29 真机复现）。
+        // target == 0 是流程声明「没有总量目标」（直播互动 / 养号），这时保留原样只看计数。
+        val shown = if (progress.target > 0) {
+            progress.copy(target = store.current.followTarget)
+        } else {
+            progress
+        }
+        binding.tvEngineStatus.text = shown.brief()
         binding.engineDot.setBackgroundResource(
             when {
                 progress.state == EngineState.PAUSED -> R.drawable.bg_dot_amber
