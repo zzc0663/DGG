@@ -104,6 +104,7 @@ class LiveInteractFlow : Flow {
                 )
             }
 
+
             // 连麦只试一次：反复申请比不申请危险得多
             if (settings.micRequest && !micTried) {
                 micTried = true
@@ -182,8 +183,11 @@ class LiveInteractFlow : Flow {
      *
      * 与 M2 共用 [LiveGuard]：容忍人为切换直播间的转场（期间读到 UNKNOWN 是正常的，
      * 早期实现在这里按返回，把用户刚切到的直播间退掉了），会在抖音不在前台时自动拉回。
+     *
+     * 走 [LiveGuard.ensureOnAirOrWait]：页面**整个读不出来**（未识别的全屏浮层，实测有
+     * 「人气开场」助力页）时不再直接终止，而是暂停 + 持续探测，浮层一没就自动接着发评论。
      */
-    private suspend fun ensureLiveRoom(ctx: FlowContext): Boolean = LiveGuard.ensureOnAir(ctx)
+    private suspend fun ensureLiveRoom(ctx: FlowContext): Boolean = LiveGuard.ensureOnAirOrWait(ctx)
 
     // ==================== 评论内容 ====================
 

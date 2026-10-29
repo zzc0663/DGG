@@ -139,7 +139,7 @@ class FollowFromLiveFlow : Flow {
             // 早期这里是「一 UNKNOWN 就按返回」，结果把用户刚切到的直播间退掉了。
             // 第一次调用允许自动导航（首页→直播页签→进房）：用户刚点了「开始服务」，
             // 明确要让脚本自己进直播间；之后的轮次不导航（跑一半在首页=用户想干别的，不抢）。
-            if (!LiveGuard.ensureOnAir(ctx, allowAutoNavigate = firstEnsure)) {
+            if (!LiveGuard.ensureOnAirOrWait(ctx, allowAutoNavigate = firstEnsure)) {
                 val detection = ctx.detector.detect()
                 throw FlowAbortException(
                     "已经不在直播间，且自动恢复失败。" +

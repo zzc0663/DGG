@@ -166,8 +166,42 @@ object LiveGuard {
         return false
     }
 
-    /** 在「直播频道」预览页点进房。返回 true 表示已进到直播间 */
-    private suspend fun enterFromLiveFeed(ctx: FlowContext): Boolean {
+    /**
+     * 与 [ensureOnAir] 相同，但**「页面整个读不出来」不再判死**，而是转成自愈暂停。
+     *
+     * 为什么需要它（2026-10-29 真机取证）：抖音的「人气开场」助力页会整屏盖住直播间，
+     * 页面判定掉成 `UNKNOWN(0/6)`，而它不在 `overlays` 配置里，[recoverOverlay] 认不出、
+     * 也就不会按返回。于是旧逻辑只能等满 3 轮 ×10s 后抛 `FlowAbortException` 终止任务——
+     * 用户什么都没做，进度（当时 2/157）却断了，还得重新进直播间从头开始。
+     *
+     * 落点不同，处置也要不同：
+     *
+     * | 判定 | 含义 | 处置 |
+     * |---|---|---|
+     * | `UNKNOWN` | 大概率是叠了一个没见过的全屏浮层（或卡在转场） | **等**：暂停 + 持续探测 |
+     * | `HOME` / `FEED` / `SEARCH_RESULT` | 用户自己切走了，脚本不该抢界面 | 返回 false，交调用方中止 |
+     *
+     * 等待期间唯一的动作是 [recoverOverlay]（识别到浮层才按返回），绝不做「猜一个位置点一下」。
+     */
+    suspend fun ensureOnAirOrWait(ctx: FlowContext, allowAutoNavigate: Boolean = false): Boolean {
+        if (ensureOnAir(ctx, allowAutoNavigate)) return true
+
+        // ensureOnAir 内部已有页码，这里重判一次是为了不引入隐式状态（1.4s，且只在失败路径上）
+        val page = ctx.detector.detect().page
+        if (page == PageState.LIVE_ROOM) return true
+        if (page != PageState.UNKNOWN) return false
+
+        LogStore.w(TAG, "页面读不出来且没有可识别的浮层，转入自愈等待（不再直接终止任务）")
+        val recovered = RecoveryWait.waitForPage(
+            ctx,
+            "页面读不出来（可能有未识别的浮层盖住直播间，如「人气开场」助力页）"
+        ) { ctx.detector.detect().page == PageState.LIVE_ROOM }
+        if (!recovered) return false
+        LogStore.i(TAG, "页面已恢复，继续执行")
+        return true
+    }
+
+    /** 在「直播频道」预览页点进房。返回 true 表示已进到直播间 */    private suspend fun enterFromLiveFeed(ctx: FlowContext): Boolean {
         val entry = ctx.actions.find(Target(Target.Kind.TEXT_CONTAINS, LIVE_FEED_ENTER_TEXT))
             ?: return false
         LogStore.w(TAG, "停在直播频道预览页，点「$LIVE_FEED_ENTER_TEXT」自动进房")
