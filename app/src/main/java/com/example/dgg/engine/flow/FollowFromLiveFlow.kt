@@ -229,7 +229,11 @@ class FollowFromLiveFlow : Flow {
                 CardState.ALREADY_FOLLOWED -> {
                     LogStore.i(TAG, "「$nickname」已经是关注状态，跳过并记入已关注名单")
                     store.markFollowed(nickname)
-                    closeCard(ctx, targets)
+                    // 刚在弹层里读到「已关注」，弹层必然还在，不必再探测
+                    closeCard(ctx, targets, knownOpen = true)
+                    // 关掉弹层后评论区同样脱离了底部，顺手拉回最新，
+                    // 免得下一次扫描还在看这几个已经关注过的人
+                    refreshComments(ctx, "跳过已关注的「$nickname」")
                     continue
                 }
 
@@ -275,7 +279,8 @@ class FollowFromLiveFlow : Flow {
                             continue
                         }
                     }
-                    closeCard(ctx, targets)
+                    // 弹层一定是开的：上一行 awaitFollowOutcome 刚在里面读到「已关注」。
+                    closeCard(ctx, targets, knownOpen = true)
 
                     followed++
                     store.markFollowed(nickname)
@@ -289,6 +294,9 @@ class FollowFromLiveFlow : Flow {
                     if (settings.intervalRest && settings.restAfterN > 0 &&
                         followed % settings.restAfterN == 0 && followed < target
                     ) {
+                        // 休息前也先把评论区拉回最新：要歇几分钟，不能让列表停在旧位置
+                        // （列表一旦贴着最新，休息期间新评论会自己滚上来）
+                        waitAfterFollow(ctx, 0L, "关注「$nickname」成功") { false }
                         ctx.publish(message = "已关注 $followed 个，按设置休息 ${settings.restSeconds}s")
                         LogStore.i(TAG, "到达休息点（每 ${settings.restAfterN} 个），休息 ${settings.restSeconds}s")
                         ctx.settle(settings.restSeconds * 1_000L)
@@ -296,7 +304,7 @@ class FollowFromLiveFlow : Flow {
                         // 间隔可能长达 60 分钟：分片等待，暂停/停止才收得到。
                         // 每片顺便看一眼设置：用户在等待期间改了目标数就提前结束，
                         // 不然他要等满这一小时才看到改动生效。
-                        ctx.settleLong(settings.scanIntervalMs, capMs = Settings.MAX_SCAN_MS) {
+                        waitAfterFollow(ctx, settings.scanIntervalMs, "关注「$nickname」成功") {
                             val now = SettingsStore.get(ctx.appContext).current
                             now.followTarget != lastSeenTargetSetting ||
                                 now.dailyLimit != lastSeenDailyLimit
@@ -503,14 +511,93 @@ class FollowFromLiveFlow : Flow {
      * 找不到它就返回 false（说明房间是真的安静），**绝不盲点坐标**。
      */
     private suspend fun jumpToNewest(ctx: FlowContext): String? {
-        for (text in NEW_MESSAGE_TEXTS) {
-            val pill = ctx.actions.find(Target(Target.Kind.TEXT_CONTAINS, text)) ?: continue
-            val label = ctx.actions.labelOf(pill) ?: text
-            LogStore.d(TAG, "发现新消息浮标：text=\"$label\"")
-            if (ctx.actions.tapNode(pill, "新消息按钮")) return label
-            LogStore.w(TAG, "点新消息浮标失败（$label）")
-        }
+        // **一趟快照**：两条浮标文案在内存里比对，命中后用快照里的矩形点。
+        // 旧实现对 2 个文案各跑一次 `find`，房间里没有浮标时就是 2 趟全树遍历（≈2.8s）——
+        // 而这段正好落在「关注完等下一批评论」的空档里，用户感知就是卡顿。
+        // 取面积最小的命中：容器节点与文本节点会同时带这串字，点容器会偏到别处。
+        val pill = ctx.actions.snapshot()
+            .asSequence()
+            .filter { fact ->
+                fact.right > fact.left && fact.bottom > fact.top &&
+                    NEW_MESSAGE_TEXTS.any { hint ->
+                        (fact.text?.contains(hint) == true) || (fact.desc?.contains(hint) == true)
+                    }
+            }
+            .minByOrNull { (it.right - it.left).toLong() * (it.bottom - it.top) }
+            ?: return null
+        val label = pill.text?.trim()?.takeIf { it.isNotEmpty() }
+            ?: pill.desc?.trim()?.takeIf { it.isNotEmpty() }
+            ?: "新消息浮标"
+        LogStore.d(
+            TAG,
+            "发现新消息浮标：\"$label\" @[${pill.left},${pill.top}][${pill.right},${pill.bottom}]"
+        )
+        if (ctx.actions.tapRect(pill.rect(), "新消息按钮")) return label
+        LogStore.w(TAG, "点新消息浮标失败（$label）")
         return null
+    }
+
+    /**
+     * 把评论区拉回最新（点抖音底部的「99+条新消息」浮标），**关注成功后立刻调用**。
+     *
+     * 为什么必须紧跟关注动作而不是等下一轮：点开评论行会让评论区**脱离底部**
+     * （见 [jumpToNewest] 的注释），之后新评论全部堆在浮标后面、屏幕上还是那批旧人。
+     * 一次关注（点昵称 → 等弹层 → 点关注 → 校验 → 关弹层）要 5~10 秒，
+     * 这期间至少堆积十几条新评论。以前要等完扫描间隔（默认 30 秒）再进下一轮扫描、
+     * 发现「一个人都不新」才去点浮标——用户看到的就是「关注完界面卡住不动，半天没动静」。
+     *
+     * 找不到浮标 = 房间真的没有新评论（或列表还贴着底部），返回 false，**绝不盲点坐标**。
+     */
+    private suspend fun refreshComments(ctx: FlowContext, reason: String): Boolean {
+        val startedAt = SystemClock.uptimeMillis()
+        val jumped = jumpToNewest(ctx)
+        if (jumped == null) {
+            LogStore.d(TAG, "$reason → 评论区没有「新消息」浮标（列表还贴着底部），无需刷新")
+            return false
+        }
+        // 给列表一点时间跳回最新再继续，否则下一轮扫描读到的还是旧位置的行
+        ctx.settle(JUMP_SETTLE_MS)
+        LogStore.i(
+            TAG,
+            "$reason → 已点「$jumped」把评论区拉回最新（耗时 ${SystemClock.uptimeMillis() - startedAt}ms）"
+        )
+        return true
+    }
+
+    /**
+     * 关注成功后的「先把评论区拉回最新，再把间隔等满」。
+     *
+     * 为什么刷新要点在这里，而不是关注一落定就点：
+     * 关注动作本身要 5~10 秒（点昵称 → 等资料卡 → 点关注 → 校验 → 关弹层），这期间评论区
+     * 已经脱离底部、新评论在往后堆；但抖音要**攒够几条**才会浮出「N条新消息」，
+     * 刚关掉弹层那一瞬间常常还是 0 条（真机实测 22:56:14、22:57:01 两次都是「没有浮标」）。
+     * 所以先等 [REFRESH_PROBE_MS]，再探。
+     *
+     * 关键点：这段耗时**算在扫描间隔里**（末尾只补剩余时间），
+     * 所以整个节奏不会比用户设置的间隔更长，也就不必为了刷新牺牲拟人化间隔。
+     *
+     * @param intervalMs 扫描间隔；传 0 表示「只刷新、不等」（休息点前的用法）
+     * @param shouldInterrupt 等待期间要检查的中断条件（用户改了目标数/每日上限）
+     */
+    private suspend fun waitAfterFollow(
+        ctx: FlowContext,
+        intervalMs: Long,
+        reason: String,
+        shouldInterrupt: () -> Boolean
+    ) {
+        val startAt = SystemClock.uptimeMillis()
+
+        // ① 先刷新。间隔太短（< 3s）时不值得为它插一段探测，交给下一轮的即时刷新兜底
+        if (intervalMs == 0L || intervalMs >= REFRESH_MIN_INTERVAL_MS) {
+            ctx.settle(REFRESH_PROBE_MS)
+            if (!shouldInterrupt()) refreshComments(ctx, reason)
+        }
+
+        // ② 补足剩余间隔。间隔可能长达 60 分钟，必须分片等待，暂停/停止才收得到
+        val rest = intervalMs - (SystemClock.uptimeMillis() - startAt)
+        if (rest > 0) {
+            ctx.settleLong(rest, capMs = Settings.MAX_SCAN_MS, shouldInterrupt = shouldInterrupt)
+        }
     }
 
     /**
@@ -844,8 +931,12 @@ class FollowFromLiveFlow : Flow {
             }
     }
 
+    /** 弹层判定的下边界：顶部 [TOP_EXCLUDE_RATIO] 是直播间头部（主播自己的关注按钮） */
+    private fun cardTopLimit(ctx: FlowContext): Int =
+        (ctx.actions.screenHeight() * TOP_EXCLUDE_RATIO).toInt()
+
     /**
-     * 判断「当前弹层里的按钮已经是关注状态」。
+     * 在一份快照里判断「弹层里的按钮已经是关注状态」。
      *
      * 配置里的 `followed_button` 是主判据（40.8 实测为「取消关注」），
      * 但抖音还有第三种态：对方也关注了你，按钮显示「互相关注」——
@@ -860,14 +951,6 @@ class FollowFromLiveFlow : Flow {
      * 一次判断要 4 秒多，而校验窗口只有 3 秒——经常一次都没采到就判「没变成已关注」，
      * 实测表现为「界面明明弹出关注成功，进度却不涨」。现在一趟遍历 + 内存比对。
      */
-    private fun isAlreadyFollowed(ctx: FlowContext, targets: LiveTargets): Boolean =
-        // ttl = 0：校验期间必须读「此刻」的界面，不能吃 700ms 缓存
-        alreadyFollowedIn(ctx.actions.snapshot(ttlMs = 0), targets, cardTopLimit(ctx))
-
-    /** 弹层判定的下边界：顶部 [TOP_EXCLUDE_RATIO] 是直播间头部（主播自己的关注按钮） */
-    private fun cardTopLimit(ctx: FlowContext): Int =
-        (ctx.actions.screenHeight() * TOP_EXCLUDE_RATIO).toInt()
-
     private fun alreadyFollowedIn(
         facts: List<Actions.NodeFacts>,
         targets: LiveTargets,
@@ -915,10 +998,13 @@ class FollowFromLiveFlow : Flow {
      *
      * 现在改为：先确认弹层还在（还能找到关注/已关注按钮）→ 用系统返回关闭 → 再确认一次。
      * 弹层已经不在了就什么都不做，避免多余的返回把直播间退掉。
+     *
+     * @param knownOpen 调用方**刚刚**在弹层里读到过「已关注 / 私密账号」时为 true——弹层必然还在，
+     *   直接返回即可，省掉那趟「还开着吗」的遍历（≈1.4s）。关注成功这条路径每关注一个人走一次，
+     *   用户对这段的感觉就是「关注完了卡住」。其余路径保持探测，因为盲按返回会退出直播间。
      */
-    private suspend fun closeCard(ctx: FlowContext, targets: LiveTargets) {
-        val stillOpen = findCardButton(ctx, targets.follow) != null ||
-            isAlreadyFollowed(ctx, targets)
+    private suspend fun closeCard(ctx: FlowContext, targets: LiveTargets, knownOpen: Boolean = false) {
+        val stillOpen = knownOpen || cardStillOpen(ctx, targets)
         if (!stillOpen) {
             LogStore.d(TAG, "弹层已不在，跳过关闭动作")
             return
@@ -927,6 +1013,23 @@ class FollowFromLiveFlow : Flow {
             LogStore.w(TAG, "返回键未生效，弹层可能仍在（下一轮会重新判断）")
         }
         ctx.settle(CLOSE_SETTLE_MS)
+    }
+
+    /**
+     * 弹层还在不在：**一趟快照**同时判「关注按钮还在」与「已是已关注态」。
+     *
+     * 原来拆成 `findCardButton`（一次 collect，≈1.4s）+ `isAlreadyFollowed`（一次 snapshot，≈1.4s），
+     * 关一次弹层要 2.8s，而这条路径每关注一个人就走一次。
+     * 这里只判「在不在」，不需要挑出面积最大的那颗按钮，所以一趟快照就够。
+     */
+    private fun cardStillOpen(ctx: FlowContext, targets: LiveTargets): Boolean {
+        val facts = ctx.actions.snapshot(ttlMs = 0)
+        val topLimit = cardTopLimit(ctx)
+        if (alreadyFollowedIn(facts, targets, topLimit)) return true
+        return facts.any { fact ->
+            fact.bottom > topLimit && fact.right > fact.left && fact.bottom > fact.top &&
+                ctx.actions.matchesFacts(fact, targets.follow)
+        }
     }
 
     /**
@@ -950,7 +1053,10 @@ class FollowFromLiveFlow : Flow {
         )
         store.markPrivate(nickname)
         ctx.publish(message = "「$nickname」是私密账号，已跳过")
-        closeCard(ctx, targets)
+        // 两个调用点都刚在弹层里读到私密证据，弹层必然还在
+        closeCard(ctx, targets, knownOpen = true)
+        // 拉回最新：不刷新的话这个人会一直留在屏幕上，下一次扫描还得再判一遍
+        refreshComments(ctx, "私密账号「$nickname」跳过")
     }
 
     /**
@@ -1059,6 +1165,18 @@ class FollowFromLiveFlow : Flow {
 
         /** 点完「新消息」后等列表跳到底部的动画 */
         const val JUMP_SETTLE_MS = 1_200L
+
+        /**
+         * 关注成功后**先等这么久再去探浮标**。
+         *
+         * 抖音要攒够几条新评论才浮出「N条新消息」，刚关掉资料卡时常常还是 0 条
+         * （真机 22:56:14 / 22:57:01 两次都是「没有浮标」）。2.5 秒是热门直播间里
+         * 攒到 1~3 条的典型时长，再长就纯属白等。
+         */
+        const val REFRESH_PROBE_MS = 2_500L
+
+        /** 扫描间隔小于这个值时不插探测：间隔本身就短，交给下一轮的即时刷新兜底 */
+        const val REFRESH_MIN_INTERVAL_MS = 3_000L
 
         /** 评论行下边界 = 输入栏顶 - 这个余量（实测最新一行底部 2170、输入栏顶 2188） */
         const val ROW_LIMIT_MARGIN = 8

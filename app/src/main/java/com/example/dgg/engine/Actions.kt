@@ -535,6 +535,27 @@ class Actions(
         return ok
     }
 
+    /**
+     * 按**快照里量出来的矩形**点一下，取点仍走 [Humanizer.pointIn] 的随机区间。
+     *
+     * 存在的理由：像「99+条新消息」浮标这种目标，手边只有 [NodeFacts]，
+     * 而 `collect + tapNode` 要再走一趟全树（实测 1.4s），`tapPoint` 又固定点正中
+     * （每个浮标都点几何中心，是很明显的机器特征）。这里把两者拼起来：
+     * 矩形来自刚抓的快照，落点在矩形内随机，与 [tapNode] 共用同一条手势通道。
+     *
+     * ⚠️ 同 [tapPoint]，这条路径**绕过了付费守卫**——调用方必须已经从快照文案确认过语义。
+     */
+    suspend fun tapRect(rect: Rect, label: String = "矩形点击"): Boolean {
+        if (rect.width() <= 0 || rect.height() <= 0) {
+            LogStore.w(TAG, "矩形无有效尺寸，拒绝点击：$label")
+            return false
+        }
+        val point = humanizer.pointIn(rect)
+        val ok = dispatchTap(point)
+        LogStore.d(TAG, "$label @ ($point) 矩形=[${rect.left},${rect.top}][${rect.right},${rect.bottom}] → $ok")
+        return ok
+    }
+
     // ==================== 滑动 ====================
 
     /** 上滑：从下方 72% 划到上方 28%，用于列表翻页 */
