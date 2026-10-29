@@ -8,6 +8,7 @@ import com.example.dgg.data.RoomStore
 import com.example.dgg.data.Settings
 import com.example.dgg.util.CurrentRoomAnchor
 import com.example.dgg.data.SettingsStore
+import com.example.dgg.engine.Actions
 import com.example.dgg.engine.Flow
 import com.example.dgg.engine.FlowAbortException
 import com.example.dgg.engine.FlowContext
@@ -232,6 +233,13 @@ class FollowFromLiveFlow : Flow {
                     continue
                 }
 
+                CardState.PRIVATE -> {
+                    // 点关注**之前**就认出是私密账号（卡里带「私密账号」标记或已经是「申请关注」态）：
+                    // 连那一次点击都不做，直接下一个人。
+                    skipPrivate(ctx, targets, store, nickname, card.evidence)
+                    continue
+                }
+
                 CardState.FOLLOWABLE -> {
                     val button = card.node
                     if (button == null || !ctx.actions.tapNode(button, "关注按钮")) {
@@ -240,17 +248,34 @@ class FollowFromLiveFlow : Flow {
                         continue
                     }
 
-                    // 关键：必须等到界面真的变成「已关注」才算成功，不接受「点了就当成功」
-                    val verified = awaitFollowedState(ctx, targets, VERIFY_TIMEOUT_MS)
-                    closeCard(ctx, targets)
-                    if (!verified) {
-                        LogStore.w(
-                            TAG,
-                            "「$nickname」点关注后 ${VERIFY_TIMEOUT_MS}ms 内未变成「已关注」，" +
-                                "按未成功处理，不计入进度"
-                        )
-                        continue
+                    // 关键：必须等到界面真的变成「已关注」才算成功，不接受「点了就当成功」。
+                    // 但私密账号是**例外中的例外**——它永远不会变成已关注，只会变成申请态，
+                    // 所以要在同一趟判据里先认出来，认出即返回，不等满 6 秒。
+                    val outcome = awaitFollowOutcome(ctx, targets, VERIFY_TIMEOUT_MS)
+                    when (outcome.state) {
+                        CardState.PRIVATE -> {
+                            // 关注动作已经发出去了（申请），但粉丝数不会增加、额度也白占。
+                            // 不计进度、不写已关注名单，改记进私密名单，下一轮直接跳过这个人。
+                            skipPrivate(ctx, targets, store, nickname, outcome.evidence)
+                            continue
+                        }
+
+                        CardState.ALREADY_FOLLOWED -> Unit // 真的关注成功，落到下面的成功分支
+
+                        else -> {
+                            // 既没变成「已关注」，也不是已知的申请态：可能是没收录的新文案。
+                            // 把弹层里所有短文案打进日志——这是唯一能把"未知文案"变成证据的地方，
+                            // 下次照着补进 privateAccountHints 就行。
+                            LogStore.w(
+                                TAG,
+                                "「$nickname」点关注后 ${VERIFY_TIMEOUT_MS}ms 内未变成「已关注」，" +
+                                    "按未成功处理，不计入进度；弹层文案：" + cardLabelsDump(ctx)
+                            )
+                            closeCard(ctx, targets)
+                            continue
+                        }
                     }
+                    closeCard(ctx, targets)
 
                     followed++
                     store.markFollowed(nickname)
@@ -646,6 +671,8 @@ class FollowFromLiveFlow : Flow {
             if (name in ctx.config.excludeNicknames) continue
             if (name in handled) continue
             if (store.isFollowed(name)) continue
+            // 判定过是私密账号的人直接排除：点开也只会再发一次没用的申请
+            if (store.isPrivate(name)) continue
             if (!fresh) {
                 skippedSeen++
                 continue
@@ -697,9 +724,28 @@ class FollowFromLiveFlow : Flow {
 
     // ==================== 弹层判定 ====================
 
-    private enum class CardState { FOLLOWABLE, ALREADY_FOLLOWED, UNKNOWN }
+    private enum class CardState {
+        FOLLOWABLE,
+        ALREADY_FOLLOWED,
 
-    private class CardProbe(val state: CardState, val node: AccessibilityNodeInfo? = null)
+        /**
+         * 对方是**私密账号**：关注只会发出一份申请，对方不通过就永远不是粉丝。
+         *
+         * 单独成态而不是并进「未变成已关注」：那一条要等满 [VERIFY_TIMEOUT_MS]（6 秒）
+         * 才下结论，而私密账号**一出现申请文案就能确定**——用户要的是「马上下一轮」，
+         * 不能在这个人身上白等 6 秒（真机反馈：关注了私密账号，人数根本没涨，还在原地磨）。
+         */
+        PRIVATE,
+
+        UNKNOWN
+    }
+
+    private class CardProbe(
+        val state: CardState,
+        val node: AccessibilityNodeInfo? = null,
+        /** 命中 PRIVATE 时具体是哪条文案，用来日志取证（也方便把漏收的文案补进配置） */
+        val evidence: String? = null
+    )
 
     private suspend fun awaitCard(ctx: FlowContext, targets: LiveTargets, timeoutMs: Long): CardProbe {
         val deadline = SystemClock.uptimeMillis() + timeoutMs
@@ -709,7 +755,21 @@ class FollowFromLiveFlow : Flow {
         var triedProfileEntry = false
         while (SystemClock.uptimeMillis() < deadline) {
             if (ctx.stopped()) return CardProbe(CardState.UNKNOWN)
-            if (isAlreadyFollowed(ctx, targets)) return CardProbe(CardState.ALREADY_FOLLOWED)
+            // 一趟快照同时判「已关注」和「私密账号」。
+            //
+            // 不能拆成两次 snapshot(ttl = 0)：单趟遍历实测约 1.4s，两次就是 2.8s，
+            // 6 秒的等卡窗口只剩两次采样，本来就紧。
+            //
+            // 顺序是**先已关注、后私密**：一个人如果已经被通过申请，卡里是「取消关注」，
+            // 那他就是真的已关注，该记进已关注名单；私密标记只是补充证据。
+            val facts = ctx.actions.snapshot(ttlMs = 0)
+            val topLimit = cardTopLimit(ctx)
+            if (alreadyFollowedIn(facts, targets, topLimit)) {
+                return CardProbe(CardState.ALREADY_FOLLOWED)
+            }
+            privateEvidenceIn(facts, ctx.config.privateAccountHints, topLimit)?.let { evidence ->
+                return CardProbe(CardState.PRIVATE, evidence = evidence)
+            }
             findCardButton(ctx, targets.follow)?.let { return CardProbe(CardState.FOLLOWABLE, it) }
 
             if (!triedProfileEntry) {
@@ -729,14 +789,34 @@ class FollowFromLiveFlow : Flow {
         return CardProbe(CardState.UNKNOWN)
     }
 
-    private suspend fun awaitFollowedState(ctx: FlowContext, targets: LiveTargets, timeoutMs: Long): Boolean {
+    /**
+     * 点完「关注」之后等结论：**变成已关注** / **其实是私密账号（只发了申请）** / 超时。
+     *
+     * 三者分开的意义：
+     * - 私密账号要**立刻**返回（申请文案一出现就能确定），不能陪着等满 6 秒；
+     * - 超时才需要把弹层现有文案 dump 出来——那是唯一能把「没收录的新文案」变成证据的地方。
+     *
+     * 每轮只跑**一趟**快照（ttl = 0，不能吃缓存），两个判据在内存里比对。
+     */
+    private suspend fun awaitFollowOutcome(
+        ctx: FlowContext,
+        targets: LiveTargets,
+        timeoutMs: Long
+    ): CardProbe {
         val deadline = SystemClock.uptimeMillis() + timeoutMs
         while (SystemClock.uptimeMillis() < deadline) {
-            if (ctx.stopped()) return false
-            if (isAlreadyFollowed(ctx, targets)) return true
+            if (ctx.stopped()) return CardProbe(CardState.UNKNOWN)
+            val facts = ctx.actions.snapshot(ttlMs = 0)
+            val topLimit = cardTopLimit(ctx)
+            if (alreadyFollowedIn(facts, targets, topLimit)) {
+                return CardProbe(CardState.ALREADY_FOLLOWED)
+            }
+            privateEvidenceIn(facts, ctx.config.privateAccountHints, topLimit)?.let { evidence ->
+                return CardProbe(CardState.PRIVATE, evidence = evidence)
+            }
             delay(CARD_POLL_MS)
         }
-        return false
+        return CardProbe(CardState.UNKNOWN)
     }
 
     /**
@@ -780,14 +860,48 @@ class FollowFromLiveFlow : Flow {
      * 一次判断要 4 秒多，而校验窗口只有 3 秒——经常一次都没采到就判「没变成已关注」，
      * 实测表现为「界面明明弹出关注成功，进度却不涨」。现在一趟遍历 + 内存比对。
      */
-    private fun isAlreadyFollowed(ctx: FlowContext, targets: LiveTargets): Boolean {
-        val topLimit = (ctx.actions.screenHeight() * TOP_EXCLUDE_RATIO).toInt()
-        val labels = ALREADY_FOLLOWED_TEXTS + targets.followed.value
+    private fun isAlreadyFollowed(ctx: FlowContext, targets: LiveTargets): Boolean =
         // ttl = 0：校验期间必须读「此刻」的界面，不能吃 700ms 缓存
-        return ctx.actions.snapshot(ttlMs = 0).any { fact ->
+        alreadyFollowedIn(ctx.actions.snapshot(ttlMs = 0), targets, cardTopLimit(ctx))
+
+    /** 弹层判定的下边界：顶部 [TOP_EXCLUDE_RATIO] 是直播间头部（主播自己的关注按钮） */
+    private fun cardTopLimit(ctx: FlowContext): Int =
+        (ctx.actions.screenHeight() * TOP_EXCLUDE_RATIO).toInt()
+
+    private fun alreadyFollowedIn(
+        facts: List<Actions.NodeFacts>,
+        targets: LiveTargets,
+        topLimit: Int
+    ): Boolean {
+        val labels = ALREADY_FOLLOWED_TEXTS + targets.followed.value
+        return facts.any { fact ->
             val text = fact.text?.trim()
             !text.isNullOrEmpty() && fact.bottom > topLimit && labels.contains(text)
         }
+    }
+
+    /**
+     * 弹层里有没有「私密账号 / 申请关注」这类证据，有则返回命中的那条文案。
+     *
+     * 同时看 `text` 和 `contentDescription`：申请态多数是按钮文案（text），
+     * 但抖音有的版本把状态挂在按钮的 desc 上，两边都扫一遍几乎不额外花钱（同一份快照）。
+     *
+     * 匹配是**全等**——包含匹配会让「关注」命中「申请关注」，把所有人判成私密账号。
+     */
+    private fun privateEvidenceIn(
+        facts: List<Actions.NodeFacts>,
+        hints: Set<String>,
+        topLimit: Int
+    ): String? {
+        if (hints.isEmpty()) return null
+        for (fact in facts) {
+            if (fact.bottom <= topLimit) continue
+            val text = fact.text?.trim()
+            if (!text.isNullOrEmpty() && hints.contains(text)) return text
+            val desc = fact.desc?.trim()
+            if (!desc.isNullOrEmpty() && hints.contains(desc)) return desc
+        }
+        return null
     }
 
     // ==================== 收尾 ====================
@@ -813,6 +927,46 @@ class FollowFromLiveFlow : Flow {
             LogStore.w(TAG, "返回键未生效，弹层可能仍在（下一轮会重新判断）")
         }
         ctx.settle(CLOSE_SETTLE_MS)
+    }
+
+    /**
+     * 判定「私密账号」后统一走这里：**不计进度、不写已关注名单**，只记进私密名单并关掉弹层。
+     *
+     * 为什么不能记进已关注名单：那会让「已关人数 / 今日已关注」两个数字说谎，
+     * `remainingToday` 也会算错额度（用户要的正是「人数没增加」这个事实被正确对待）。
+     * 为什么还要单独存一份：同一个人会反复在评论区说话，不记就得反复点开、反复发申请。
+     */
+    private suspend fun skipPrivate(
+        ctx: FlowContext,
+        targets: LiveTargets,
+        store: FollowedStore,
+        nickname: String,
+        evidence: String?
+    ) {
+        LogStore.w(
+            TAG,
+            "「$nickname」是私密账号（命中「${evidence ?: "?"}」）：关注只会发出申请、" +
+                "粉丝数不会增加，跳过且不计入进度"
+        )
+        store.markPrivate(nickname)
+        ctx.publish(message = "「$nickname」是私密账号，已跳过")
+        closeCard(ctx, targets)
+    }
+
+    /**
+     * 把弹层里的短文案拼成一行写进日志。
+     *
+     * 用途只有一个：**下次遇到没收录的申请态文案时能照着补进 `privateAccountHints`**。
+     * 抖音的私密账号提示文案在版本间来回改过（已申请 / 已提交请求 / 等待通过…），
+     * 与其猜，不如让真机把实际文案吐出来。只在超时这条罕见路径上跑一趟遍历，成本可接受。
+     */
+    private fun cardLabelsDump(ctx: FlowContext): String {
+        val topLimit = cardTopLimit(ctx)
+        val labels = ctx.actions.snapshot(ttlMs = 0)
+            .filter { it.bottom > topLimit }
+            .mapNotNull { it.text?.trim()?.takeIf { t -> t.isNotEmpty() && t.length <= CARD_LABEL_MAX_LEN } }
+            .distinct()
+        return if (labels.isEmpty()) "（读不到任何短文案）" else labels.joinToString("、")
     }
 
     /** 从配置里取出本流程要用的目标，缺关键项直接中止（不做静默降级） */
@@ -941,6 +1095,14 @@ class FollowFromLiveFlow : Flow {
 
         /** 点「资料卡」后等卡片滑入动画结束，避免拿动画中的 bounds 去点关注 */
         const val CARD_ENTRY_SETTLE_MS = 900L
+
+        /**
+         * 诊断日志里「弹层文案」的长度上限。
+         *
+         * 只要按钮级短文案：昵称、简介、粉丝数这些长文本混进来会把一行日志撑爆，
+         * 反而不利于照着补配置。
+         */
+        const val CARD_LABEL_MAX_LEN = 8
 
         /**
          * 等抖音切到前台的初始等待。

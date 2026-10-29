@@ -36,6 +36,36 @@ class FollowedStore private constructor(private val prefs: SharedPreferences) {
     fun knownCount(): Int = names().size
 
     /**
+     * 这个昵称是否被判定过「私密账号」（关注只会发出申请，粉丝数不会增加）。
+     *
+     * 与已关注名单**分开存**：私密账号并没有被关注成功，混进 [names] 会让
+     * 「已关人数 / 今日已关注」两个数字说谎，也会让 `remainingToday` 算错额度。
+     * 但两边都要参与去重——不然每次见到同一个人还要白点一次「关注」。
+     */
+    fun isPrivate(nickname: String): Boolean = privateNames().contains(nickname)
+
+    fun privateCount(): Int = privateNames().size
+
+    /**
+     * 记下「这个是私密账号，以后别再试」。
+     *
+     * 为什么要持久化：私密账号在直播间评论区会反复说话，一次会话里遇到同一个人好几次
+     * 很常见；不记的话每一轮都要重新点开资料卡、点一次关注、再等界面变申请态，纯浪费。
+     */
+    @Synchronized
+    fun markPrivate(nickname: String) {
+        val set = LinkedHashSet(privateNames())
+        if (!set.add(nickname)) return
+        while (set.size > MAX_NAMES) {
+            val iterator = set.iterator()
+            if (!iterator.hasNext()) break
+            iterator.next()
+            iterator.remove()
+        }
+        prefs.edit().putString(KEY_PRIVATE, set.joinToString(SEPARATOR)).apply()
+    }
+
+    /**
      * 全部已关注昵称，**按关注时间倒序**（最新关注的最前）。
      * 悬浮面板「已关人数」直接展示它；数据本身就是这个顺序（markFollowed 追加到尾部）。
      */
@@ -83,12 +113,20 @@ class FollowedStore private constructor(private val prefs: SharedPreferences) {
         return raw.split(SEPARATOR).filter { it.isNotBlank() }.toSet()
     }
 
+    private fun privateNames(): Set<String> {
+        val raw = prefs.getString(KEY_PRIVATE, null) ?: return emptySet()
+        if (raw.isBlank()) return emptySet()
+        return raw.split(SEPARATOR).filter { it.isNotBlank() }.toSet()
+    }
+
     private fun today(): String = dayFormat.format(Date())
 
     companion object {
         private const val TAG = "关注记录"
         private const val PREFS = "dgg_followed"
         private const val KEY_NAMES = "followed_names"
+        /** 私密账号名单：关注只会发申请、粉丝数不增加，永远不会进 [KEY_NAMES] */
+        private const val KEY_PRIVATE = "private_names"
         private const val KEY_DAY = "day_key"
         private const val KEY_DAY_COUNT = "day_count"
         private const val SEPARATOR = "\n"

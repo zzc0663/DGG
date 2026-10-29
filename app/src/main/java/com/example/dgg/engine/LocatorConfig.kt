@@ -92,7 +92,18 @@ data class LocatorConfig(
      * 缺这一段时用 [DEFAULT_OVERLAYS]——等价于 M2 时代的「赠送 / 资料卡 / 发送」三条硬编码，
      * 旧配置文件不会因为少一段而行为退化。
      */
-    val overlays: Map<String, OverlayRule> = DEFAULT_OVERLAYS
+    val overlays: Map<String, OverlayRule> = DEFAULT_OVERLAYS,
+    /**
+     * 「私密账号」的判据文案（**全等**匹配）。
+     *
+     * 私密账号关注后只是**发出一份申请**，对方不通过就永远不是粉丝——抖音官方口径是
+     * 「开启私密账号后，所有关注操作都会变成提交申请，不会直接关注成功」。
+     * 对脚本来说这是一次**白干的动作**：粉丝数不会增加，占了一次关注额度，
+     * 还多花一次点击。所以要在弹层里尽早认出它，跳过并把这个人记进私密名单。
+     *
+     * 缺这一段时用 [DEFAULT_PRIVATE_HINTS]，旧配置文件不会因此丢掉这个能力。
+     */
+    val privateAccountHints: Set<String> = DEFAULT_PRIVATE_HINTS
 ) {
 
     fun target(name: String): Target? = targets[name]
@@ -102,6 +113,17 @@ data class LocatorConfig(
 
         val DEFAULT_EXCLUDE_NICKNAMES: Set<String> = setOf(
             "我", "作者", "主播", "管理员", "房管", "粉丝团"
+        )
+
+        /**
+         * 配置里没有 `privateAccountHints` 时的兜底。
+         *
+         * 只收「一定是申请态」的文案：`私密账号`（资料卡上的标记）+ 各种版本的申请按钮文案。
+         * 一律**全等**匹配——写成包含匹配会让「关注」命中「申请关注」，把所有人判成私密账号。
+         */
+        val DEFAULT_PRIVATE_HINTS: Set<String> = setOf(
+            "私密账号", "私密帐户", "申请关注", "已申请", "已提交请求", "等待通过",
+            "请求关注", "已发送关注请求", "关注请求已发送", "已发送申请", "申请已发送"
         )
 
         /**
@@ -198,13 +220,20 @@ data class LocatorConfig(
 
             val overlays = parseOverlays(root.optJSONObject("overlays"))
 
+            val privateHints = root.optJSONArray("privateAccountHints")?.let { array ->
+                (0 until array.length())
+                    .mapNotNull { array.optString(it)?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                    .toSet()
+            }?.takeIf { it.isNotEmpty() } ?: DEFAULT_PRIVATE_HINTS
+
             return LocatorConfig(
                 version,
                 pages,
                 targets,
                 exclude,
                 FeedConfig.parse(root.optJSONObject("feed")),
-                overlays
+                overlays,
+                privateHints
             )
         }
 
