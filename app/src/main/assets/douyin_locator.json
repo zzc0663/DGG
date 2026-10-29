@@ -3,7 +3,7 @@
   "_verified": "40.8.0 / OPPO PLB110（Android 17）2026-10-27 真机校准",
   "_notes_on_ids": "抖音 40.8.0 的 resource-id 全是混淆短码（j_x / gxu / 5ym / 0py），随版本变化且无规律。本文件刻意不依赖任何 id，只用 text / content-desc。",
   "_notes_on_comment_line": "实测 40.8.0 的评论是「一整行一个 text 节点」，内容为 `昵称：正文`，昵称不是独立节点，也没有稳定的 nickname id。因此不走 id 主路径，直接用冒号切分。若将来版本暴露了独立昵称节点，再补 live_comment_nickname。",
-  "version": 12,
+  "version": 13,
   "_unverified_targets": "live_comment_send 待校准（要点开评论面板才会出现「发送」）；live_mic_button 随直播间而异——实测这个直播间底栏只有 表情入口/小心心/礼物/更多面板，没有独立连线按钮，流程会记警告后跳过。",
   "_privateAccountHints": "私密账号的判据：抖音官方口径是「开启私密账号后，所有关注操作都会变成提交申请，不会直接关注成功」，按钮/提示会变成申请类文案。这里用**全等匹配**（不是包含），所以「关注」不会命中「申请关注」。实测遇到未收录的文案时，日志会打出「弹层文案：…」，照抄进来即可。",
   "privateAccountHints": [
@@ -191,8 +191,19 @@
       ]
     }
   },
-  "_overlays_note": "压在直播间上、按一次返回就能关掉的浮层。命中即 back()，**绝不点浮层里的任何控件**（礼物面板全是付费入口）。只在页面判定不是 LIVE_ROOM 时才启用。features 的 value 为 2026-10-29 真机 uiautomator dump 实测。",
+  "_overlays_note": "压在直播间上、按一次返回就能关掉的浮层。命中即 back()，**绝不点浮层里的任何控件**（礼物面板全是付费入口）。⚠️ **不能拿页面判定做前置门禁**：观众列表是半屏浮层、直播间特征仍在，detect() 仍是 LIVE_ROOM（第一版因此 14 秒关不掉）；安全性靠「阈值 + 文案唯一性」，正常直播间凑不够分。features 的 value 均为真机 uiautomator dump 实测。",
   "overlays": {
+    "LIVE_PROFILE_FULL": {
+      "label": "主播主页",
+      "threshold": 4,
+      "_measured": "2026-10-29 真机 dump：点主播头像弹出的**全屏**主页，页面判定掉成 UNKNOWN(0/6)（半屏资料卡的 PROFILE_CARD 规则认不出它）。实测 text=[一顆椰子u0u3、安道尔、主播暂未发布预告、开播通知我、加群、已关注、粉丝团、团成员：3.5万、会员、211人]，desc=[关闭、…头像、荣誉等级37级勋章、已关注 按钮、取消关注 按钮、举报 按钮]。两条主特征都只在主页出现：text「开播通知我」、descContains「举报 按钮」；desc 精确「关闭」与直播间那颗「关闭 按钮」不撞，与礼物面板的「关闭」共用但权重只给 1（礼物面板 GIFT_PANEL 拿 9 分优先）。",
+      "features": [
+        { "w": 4, "type": "text", "value": "开播通知我" },
+        { "w": 2, "type": "descContains", "value": "举报 按钮" },
+        { "w": 1, "type": "text", "value": "加群" },
+        { "w": 1, "type": "desc", "value": "关闭" }
+      ]
+    },
     "GIFT_PANEL": {
       "label": "礼物面板",
       "threshold": 5,
