@@ -42,6 +42,16 @@ object TaskEngine {
     private var job: Job? = null
     private val finished = AtomicBoolean(true)
 
+    /**
+     * 上一次启动的流程。终态后「重试」要用它重新开一轮，
+     * 用户不必回 App 再点一次「开始服务」（那还得重新进直播间）。
+     *
+     * 三个 Flow 都是无状态的（所有变量都在 `run()` 里），实例可以直接复用。
+     */
+    @Volatile
+    var lastFlow: Flow? = null
+        private set
+
     @Volatile
     private var paused = false
 
@@ -49,6 +59,9 @@ object TaskEngine {
     private var stopRequested = false
 
     val isRunning: Boolean get() = job?.isActive == true
+
+    /** 是否处于暂停（手动暂停与自愈暂停共用这一个标志，见 [pauseForRecovery]） */
+    val isPausedNow: Boolean get() = paused
 
     // ==================== 生命周期 ====================
 
@@ -80,9 +93,13 @@ object TaskEngine {
             settings = settings,
             mutate = { transform -> _progress.value = transform(_progress.value) },
             stopFlag = { stopRequested },
-            resumeWaiter = { awaitResume() }
+            resumeWaiter = { awaitResume() },
+            pauseAuto = { reason -> pauseForRecovery(reason) },
+            resumeAuto = { resume() },
+            pausedFlag = { paused }
         )
 
+        lastFlow = flow
         paused = false
         stopRequested = false
         finished.set(false)
@@ -117,17 +134,34 @@ object TaskEngine {
     }
 
     fun pause() {
+        hold(EngineState.PAUSED, "已暂停", "任务暂停")
+    }
+
+    /**
+     * 自愈暂停：流程发现「现在读不到界面，但过一会儿可能会好」时调用。
+     *
+     * 与 [pause] 共用 `paused` 标志——用户在悬浮窗/主界面点「继续」时走的是同一个
+     * [resume]，「跟手动暂停一个逻辑」；区别只有状态文案和「会不会自己恢复」。
+     *
+     * 调用方（[com.example.dgg.engine.flow.RecoveryWait]）不调 [awaitResume]，
+     * 而是自己循环探测并轮询 [isPausedNow]，这样用户手动恢复也能立刻被感知。
+     */
+    fun pauseForRecovery(reason: String) {
+        hold(EngineState.PAUSED_WAIT, reason, "任务进入等待恢复：$reason")
+    }
+
+    private fun hold(state: EngineState, message: String, log: String) {
         if (job?.isActive != true) {
             LogStore.w(TAG, "当前无运行任务，忽略暂停")
             return
         }
         paused = true
         _progress.value = _progress.value.copy(
-            state = EngineState.PAUSED,
-            message = "已暂停",
+            state = state,
+            message = message,
             updatedAt = System.currentTimeMillis()
         )
-        LogStore.i(TAG, "任务暂停")
+        LogStore.i(TAG, log)
     }
 
     fun resume() {

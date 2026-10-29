@@ -48,6 +48,26 @@ data class PageRule(val name: String, val threshold: Int, val features: List<Fea
 }
 
 /**
+ * 「压在直播间上、按一次返回就能关掉」的浮层规则（礼物面板 / 观众列表 / 资料卡 / 评论键盘）。
+ *
+ * 与 [PageRule] 同一套加权投票，但用途相反：页面规则回答「我在哪」，
+ * 这里回答「有什么东西盖住了我」。识别到之后**只允许按一次返回**，
+ * 绝不点浮层里的任何控件——礼物面板里每个可点元素都是「选礼物 / 赠送 / 充值」。
+ *
+ * 为什么配置化：这套文案是抖音改版最频繁的地方，2026-10-29 实测
+ * 礼物面板只暴露礼物卡节点（`赠送`、`双击赠送`、`N 钻`），观众列表只暴露
+ * 两个页签（`在线观众` / `玩家榜`），全靠硬编码三个词必然越用越不准。
+ */
+data class OverlayRule(
+    val key: String,
+    val label: String,
+    val threshold: Int,
+    val features: List<Feature>
+) {
+    val maxScore: Int get() = features.sumOf { it.weight }
+}
+
+/**
  * 定位配置：页面规则 + 命名目标。
  *
  * 全部来自 assets 的 JSON，改版时改配置不发版。解析失败一律降级到 [fallback]，
@@ -66,7 +86,13 @@ data class LocatorConfig(
      * 所以单独成类（见 [FeedConfig]）。缺这一段时用默认值——养号是老功能的新增，
      * 不该因为旧配置文件没有 feed 段就跑不起来。
      */
-    val feed: FeedConfig = FeedConfig()
+    val feed: FeedConfig = FeedConfig(),
+    /**
+     * 浮层规则（礼物面板 / 观众列表 / 资料卡 / 评论键盘）。
+     * 缺这一段时用 [DEFAULT_OVERLAYS]——等价于 M2 时代的「赠送 / 资料卡 / 发送」三条硬编码，
+     * 旧配置文件不会因为少一段而行为退化。
+     */
+    val overlays: Map<String, OverlayRule> = DEFAULT_OVERLAYS
 ) {
 
     fun target(name: String): Target? = targets[name]
@@ -76,6 +102,27 @@ data class LocatorConfig(
 
         val DEFAULT_EXCLUDE_NICKNAMES: Set<String> = setOf(
             "我", "作者", "主播", "管理员", "房管", "粉丝团"
+        )
+
+        /**
+         * 配置里没有 `overlays` 段时的兜底：等价于 M2 时代硬编码的三个精确文案。
+         *
+         * 刻意只保留最保守的三条（阈值就是单条特征的分），宁可少认几种浮层
+         * （认不出的表现是「等一会儿再中止/暂停」，不会误点），也不要多认。
+         */
+        val DEFAULT_OVERLAYS: Map<String, OverlayRule> = linkedMapOf(
+            "GIFT_PANEL" to OverlayRule(
+                "GIFT_PANEL", "礼物面板", 3,
+                listOf(Feature(3, Target(Target.Kind.TEXT, "赠送")))
+            ),
+            "PROFILE_CARD" to OverlayRule(
+                "PROFILE_CARD", "资料卡", 2,
+                listOf(Feature(2, Target(Target.Kind.TEXT, "资料卡")))
+            ),
+            "COMMENT_KEYBOARD" to OverlayRule(
+                "COMMENT_KEYBOARD", "评论键盘", 2,
+                listOf(Feature(2, Target(Target.Kind.TEXT, "发送")))
+            )
         )
 
         fun parse(root: JSONObject): LocatorConfig {
@@ -149,7 +196,66 @@ data class LocatorConfig(
                     .toSet()
             }?.takeIf { it.isNotEmpty() } ?: DEFAULT_EXCLUDE_NICKNAMES
 
-            return LocatorConfig(version, pages, targets, exclude, FeedConfig.parse(root.optJSONObject("feed")))
+            val overlays = parseOverlays(root.optJSONObject("overlays"))
+
+            return LocatorConfig(
+                version,
+                pages,
+                targets,
+                exclude,
+                FeedConfig.parse(root.optJSONObject("feed")),
+                overlays
+            )
+        }
+
+        /**
+         * 解析 `overlays` 段。缺段 / 全非法 → 用 [DEFAULT_OVERLAYS]。
+         *
+         * 与 [parse] 里的 pages 解析同一套纪律：跳过 `_` 开头的注释键、`optJSONObject()`
+         * 而不是硬转、阈值超过满分直接丢弃并告警——一份写坏的配置只会少认几种浮层，
+         * 不会让整份定位配置降级。
+         */
+        private fun parseOverlays(json: JSONObject?): Map<String, OverlayRule> {
+            if (json == null) return DEFAULT_OVERLAYS
+            val result = LinkedHashMap<String, OverlayRule>()
+            json.keys().forEach { key ->
+                if (key.startsWith("_")) return@forEach
+                val obj = json.optJSONObject(key)
+                if (obj == null) {
+                    LogStore.w(TAG, "overlays.$key 不是对象，已跳过")
+                    return@forEach
+                }
+                val rulesJson = obj.optJSONArray("features")
+                if (rulesJson == null || rulesJson.length() == 0) {
+                    LogStore.w(TAG, "overlays.$key 无 features，已跳过")
+                    return@forEach
+                }
+                val features = (0 until rulesJson.length()).mapNotNull { i ->
+                    val featureJson = rulesJson.optJSONObject(i) ?: return@mapNotNull null
+                    val target = parseTarget(featureJson) ?: return@mapNotNull null
+                    Feature(featureJson.optInt("w", 1), target)
+                }
+                if (features.isEmpty()) {
+                    LogStore.w(TAG, "overlays.$key 的 features 全部非法，已跳过")
+                    return@forEach
+                }
+                val label = obj.optString("label").takeIf { it.isNotBlank() } ?: key
+                val rule = OverlayRule(key, label, obj.optInt("threshold", -1), features)
+                when {
+                    rule.threshold <= 0 -> LogStore.w(TAG, "overlays.$key 缺少合法 threshold，已跳过")
+                    rule.maxScore < rule.threshold -> LogStore.w(
+                        TAG,
+                        "overlays.$key 阈值 ${rule.threshold} 超过满分 ${rule.maxScore}，永远无法命中，已跳过"
+                    )
+
+                    else -> result[key] = rule
+                }
+            }
+            if (result.isEmpty()) {
+                LogStore.w(TAG, "overlays 段没有任何有效规则，改用内置 ${DEFAULT_OVERLAYS.size} 条")
+                return DEFAULT_OVERLAYS
+            }
+            return result
         }
 
         private fun parseTarget(obj: JSONObject): Target? {

@@ -49,6 +49,7 @@ import com.example.dgg.engine.NurtureTags
 import com.example.dgg.engine.PageDetector
 import com.example.dgg.engine.SmokeFlow
 import com.example.dgg.engine.TaskEngine
+import com.example.dgg.engine.withLiveTarget
 import com.example.dgg.engine.flow.FollowFromLiveFlow
 import com.example.dgg.engine.flow.LiveInteractFlow
 import com.example.dgg.engine.flow.NurtureFlow
@@ -57,6 +58,7 @@ import com.example.dgg.service.DebugChannel
 import com.example.dgg.service.OtaService
 import com.example.dgg.service.DggAccessibilityService
 import com.example.dgg.service.EngineController
+import com.example.dgg.service.FloatWindowService
 import com.example.dgg.util.AppPermissions
 import com.example.dgg.util.DouyinLauncher
 import com.google.android.material.slider.Slider
@@ -171,6 +173,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 抖关关在前台：任务到终态时悬浮面板不再自动展开（见 FloatWindowService.observe），
+        // 同时把「在抖音里展开着看结论」的那块面板收起来，别挡参数区。
+        AppVisibility.onResume()
+        FloatWindowService.collapseIfExpanded()
         // 从系统设置页返回后必须重新读一次，否则用户授权了却仍显示未授权
         val state = refreshPermissionState()
         // 悬浮面板上也能改「目标关注数量 / 每日上限」，而本界面的输入框只在 onCreate 绑定一次。
@@ -205,6 +211,12 @@ class MainActivity : AppCompatActivity() {
         if (edit.text?.toString()?.toIntOrNull() == value) return
         edit.setText(value.toString())
         edit.setSelection(edit.text?.length ?: 0)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // 只有确认「界面不在前台」之后，终态面板才允许自动展开（见 FloatWindowService.observe）
+        AppVisibility.onPause()
     }
 
     override fun onDestroy() {
@@ -963,9 +975,15 @@ class MainActivity : AppCompatActivity() {
                     LogStore.i(TAG, "点击「暂停」")
                 }
 
-                EngineState.PAUSED -> {
+                EngineState.PAUSED, EngineState.PAUSED_WAIT -> {
                     TaskEngine.resume()
-                    LogStore.i(TAG, "点击「继续」")
+                    LogStore.i(TAG, "点击「继续」（当前 ${TaskEngine.progress.value.state.label}）")
+                }
+
+                EngineState.ERROR -> {
+                    LogStore.i(TAG, "点击「重试」，用上一次的流程重新开始")
+                    EngineController.restartLast(this)
+                        .onFailure { toast(it.message ?: "重试失败") }
                 }
 
                 else -> confirmAndStart()
@@ -1012,15 +1030,11 @@ class MainActivity : AppCompatActivity() {
         // 分母取**当前设置**：progress.target 是任务启动瞬间的快照，用户在悬浮面板上改了
         // 「设置关注」它不会跟着变，状态条就一直停在旧数字上（2026-10-29 真机复现）。
         // target == 0 是流程声明「没有总量目标」（直播互动 / 养号），这时保留原样只看计数。
-        val shown = if (progress.target > 0) {
-            progress.copy(target = store.current.followTarget)
-        } else {
-            progress
-        }
-        binding.tvEngineStatus.text = shown.brief()
+        binding.tvEngineStatus.text = progress.withLiveTarget(store.current.followTarget).brief()
         binding.engineDot.setBackgroundResource(
             when {
-                progress.state == EngineState.PAUSED -> R.drawable.bg_dot_amber
+                progress.state == EngineState.PAUSED ||
+                    progress.state == EngineState.PAUSED_WAIT -> R.drawable.bg_dot_amber
                 active -> R.drawable.bg_dot_green
                 else -> R.drawable.bg_dot_red
             }
@@ -1037,7 +1051,9 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnStartService.text = when (progress.state) {
             EngineState.RUNNING -> "暂停"
-            EngineState.PAUSED -> "继续"
+            // 手动暂停与自愈暂停（等待恢复）共用同一颗按钮
+            EngineState.PAUSED, EngineState.PAUSED_WAIT -> "继续"
+            EngineState.ERROR -> "重试"
             else -> "开始服务"
         }
         binding.btnStartService.isEnabled = license.state.value.authorized || active

@@ -3,7 +3,7 @@
   "_verified": "40.8.0 / OPPO PLB110（Android 17）2026-10-27 真机校准",
   "_notes_on_ids": "抖音 40.8.0 的 resource-id 全是混淆短码（j_x / gxu / 5ym / 0py），随版本变化且无规律。本文件刻意不依赖任何 id，只用 text / content-desc。",
   "_notes_on_comment_line": "实测 40.8.0 的评论是「一整行一个 text 节点」，内容为 `昵称：正文`，昵称不是独立节点，也没有稳定的 nickname id。因此不走 id 主路径，直接用冒号切分。若将来版本暴露了独立昵称节点，再补 live_comment_nickname。",
-  "version": 10,
+  "version": 11,
   "_unverified_targets": "live_comment_send 待校准（要点开评论面板才会出现「发送」）；live_mic_button 随直播间而异——实测这个直播间底栏只有 表情入口/小心心/礼物/更多面板，没有独立连线按钮，流程会记警告后跳过。",
   "excludeNicknames": [
     "我",
@@ -174,6 +174,56 @@
           "type": "descContains",
           "value": "音乐"
         }
+      ]
+    }
+  },
+  "_overlays_note": "压在直播间上、按一次返回就能关掉的浮层。命中即 back()，**绝不点浮层里的任何控件**（礼物面板全是付费入口）。只在页面判定不是 LIVE_ROOM 时才启用。features 的 value 为 2026-10-29 真机 uiautomator dump 实测。",
+  "overlays": {
+    "GIFT_PANEL": {
+      "label": "礼物面板",
+      "threshold": 5,
+      "_measured": "40.8.x 实测：面板打开后当前窗口只剩礼物卡节点。选中礼物出现 text='赠送'；每张礼物卡的 desc 是「人气票 1 钻 双击赠送」；价格是 'N 钻'；面板空白关闭区的 desc 恰好是 '关闭'（直播间那颗是「关闭 按钮」，精确匹配不会撞）。",
+      "features": [
+        { "w": 3, "type": "text", "value": "赠送" },
+        { "w": 3, "type": "descContains", "value": "双击赠送" },
+        { "w": 2, "type": "textContains", "value": "钻" },
+        { "w": 1, "type": "desc", "value": "关闭" }
+      ]
+    },
+    "VIEWER_LIST": {
+      "label": "观众列表",
+      "threshold": 3,
+      "_measured": "40.8.x 实测：点右上角人数弹出半屏面板，**整块面板在无障碍树里只暴露一个节点** —— desc 恰好是「在线观众」（bounds 20,1030-1080,1180）。第一次打开时还能看到 desc「玩家榜」页签，换了形态就只剩标题。直播间右上角那颗人数是 descContains「941在线观众」，精确 desc 不匹配，所以这条特征不会误伤。它是半屏浮层，直播间上半部还在、页面判定仍是 LIVE_ROOM —— 千万不能用页面判定当门禁。",
+      "features": [
+        { "w": 3, "type": "desc", "value": "在线观众" },
+        { "w": 2, "type": "desc", "value": "玩家榜" },
+        { "w": 1, "type": "textContains", "value": "贡献榜" }
+      ]
+    },
+    "PROFILE_CARD": {
+      "label": "资料卡",
+      "threshold": 2,
+      "features": [
+        { "w": 2, "type": "text", "value": "资料卡" }
+      ]
+    },
+    "LONG_PRESS_MENU": {
+      "label": "长按菜单",
+      "threshold": 5,
+      "_measured": "40.8.x 实测：长按直播画面弹「不感兴趣 / 小窗播放 / 投屏 / 稍后再说 / 转发到日常」，同样会把评论节点带走、页面判定掉成 UNKNOWN。注意不要用「分享」当特征——直播间右侧那颗 desc 就叫「分享」，天天都在。",
+      "features": [
+        { "w": 3, "type": "text", "value": "不感兴趣" },
+        { "w": 2, "type": "text", "value": "小窗播放" },
+        { "w": 2, "type": "text", "value": "投屏" },
+        { "w": 2, "type": "text", "value": "稍后再说" },
+        { "w": 2, "type": "text", "value": "转发到日常" }
+      ]
+    },
+    "COMMENT_KEYBOARD": {
+      "label": "评论键盘",
+      "threshold": 2,
+      "features": [
+        { "w": 2, "type": "text", "value": "发送" }
       ]
     }
   },

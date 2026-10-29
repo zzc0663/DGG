@@ -14,8 +14,10 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.dgg.R
 import com.example.dgg.data.LogStore
+import com.example.dgg.data.SettingsStore
 import com.example.dgg.engine.EngineProgress
 import com.example.dgg.engine.TaskEngine
+import com.example.dgg.engine.withLiveTarget
 import com.example.dgg.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -111,6 +113,18 @@ class ControlService : Service() {
         notificationManager.createNotificationChannel(channel)
     }
 
+    /**
+     * 通知正文。
+     *
+     * 分母取**用户当前设置**（[com.example.dgg.engine.withLiveTarget]）：`progress.target`
+     * 是任务启动那一刻的快照，用户在悬浮面板把目标改成 220，通知栏会一直挂着旧的 `0/260`。
+     * 终态时这行最难看出真假——任务已经停了，数字却还停在旧分母上，容易让人以为还在跑。
+     *
+     * 不再重复状态：标题已经是「抖关关 · 运行中」，正文里再来一句「运行中 · 」纯属占位。
+     */
+    private fun liveBrief(progress: EngineProgress): String =
+        progress.withLiveTarget(SettingsStore.get(this).current.followTarget).brief(includeState = false)
+
     private fun buildNotification(progress: EngineProgress): Notification {
         val openApp = PendingIntent.getActivity(
             this,
@@ -129,11 +143,12 @@ class ControlService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val text = liveBrief(progress)
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_logo)
             .setContentTitle("抖关关 · ${progress.state.label}")
-            .setContentText(progress.brief())
-            .setStyle(NotificationCompat.BigTextStyle().bigText(progress.brief()))
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setContentIntent(openApp)
             .setOngoing(progress.state.isActive)
             .setOnlyAlertOnce(true)
@@ -166,7 +181,7 @@ class ControlService : Service() {
 
         if (progress.state.isActive) sawActive = true
 
-        val text = progress.brief()
+        val text = liveBrief(progress)
         if (text != lastText) {
             lastText = text
             // 通知可见性取决于 POST_NOTIFICATIONS，未授权时 notify 会被静默丢弃，这里只记录一次

@@ -23,7 +23,9 @@ import com.example.dgg.databinding.ViewFloatStatusBinding
 import com.example.dgg.engine.EngineProgress
 import com.example.dgg.engine.EngineState
 import com.example.dgg.engine.TaskEngine
+import com.example.dgg.engine.withLiveTarget
 import android.view.inputmethod.InputMethodManager
+import com.example.dgg.ui.AppVisibility
 import com.example.dgg.util.CurrentRoomAnchor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -155,6 +157,7 @@ class FloatWindowService : Service() {
 
         binding = b
         params = lp
+        instance = this
         setExpanded(false, animate = false)
         render(TaskEngine.progress.value)
         // 窗口在就要盯设置：胶囊/面板上的目标数必须跟着参数页走（见 startSettingsWatch）
@@ -231,9 +234,21 @@ class FloatWindowService : Service() {
                 TaskEngine.pause()
             }
 
-            EngineState.PAUSED -> {
-                LogStore.i(TAG, "悬浮窗「继续」被点击")
+            // 手动暂停与自愈暂停共用同一个 resume：等待恢复期间用户也可以直接接管
+            EngineState.PAUSED, EngineState.PAUSED_WAIT -> {
+                LogStore.i(TAG, "悬浮窗「继续」被点击（当前 ${TaskEngine.progress.value.state.label}）")
                 TaskEngine.resume()
+            }
+
+            // 异常终止后给一次「重试」：不用回 App 重新点「开始服务」，也不用重新进直播间。
+            // **风控停机不提供这个入口**（枚举里根本没列它）——命中风控必须由人来判断，
+            // 自动重试是最容易被判成机器行为的操作。
+            EngineState.ERROR -> {
+                LogStore.i(TAG, "悬浮窗「重试」被点击，用同一流程重新开始")
+                val result = EngineController.restartLast(this)
+                if (result.isFailure) {
+                    LogStore.w(TAG, "重试失败：${result.exceptionOrNull()?.message}")
+                }
             }
 
             else -> LogStore.d(TAG, "当前无运行任务，忽略暂停/继续")
@@ -469,9 +484,20 @@ class FloatWindowService : Service() {
                 render(progress)
 
                 if (sawActive && !progress.state.isActive) {
-                    // 终态：保留悬浮窗并把结论摊开给人看，绝不自动消失
-                    setExpanded(true)
-                    LogStore.i(TAG, "任务已到终态（${progress.state.label}），面板保留待用户关闭")
+                    // 终态：保留悬浮窗并把结论摊开给人看，绝不自动消失。
+                    // 但**抖关关自己在前台时不展开**：面板纵向约 405~1485，正好盖住参数区，
+                    // 用户想改参数还得先点 ⌃ 收起（2026-10-29 真机反馈）。
+                    // 结论在主界面底部状态条里本来就有，不需要再挡一遍。
+                    if (AppVisibility.isUiForeground) {
+                        setExpanded(false)
+                        LogStore.i(
+                            TAG,
+                            "任务已到终态（${progress.state.label}），App 在前台，不展开面板（状态条已有结论）"
+                        )
+                    } else {
+                        setExpanded(true)
+                        LogStore.i(TAG, "任务已到终态（${progress.state.label}），面板保留待用户关闭")
+                    }
                 }
             }
         }
@@ -490,7 +516,7 @@ class FloatWindowService : Service() {
 
         val dot = when (progress.state) {
             EngineState.RUNNING -> R.drawable.bg_dot_green
-            EngineState.PAUSED -> R.drawable.bg_dot_amber
+            EngineState.PAUSED, EngineState.PAUSED_WAIT -> R.drawable.bg_dot_amber
             else -> R.drawable.bg_dot_red
         }
         b.floatDot.setBackgroundResource(dot)
@@ -500,12 +526,13 @@ class FloatWindowService : Service() {
         // progress.target 是流程启动时（以及上一轮 publish 时）冻结的快照：用户在面板上
         // 「设置关注」改了目标数，这个字段不会跟着变，界面上就是「输入人数后毫无变化」
         // （2026-10-29 真机复现：改成 300、点确定，大号计数仍是 0/200）。
-        //
-        // 但 progress.target == 0 是**流程明确声明「没有总量目标」**（直播互动、养号都这么发），
-        // 这时只能显示纯计数，不能拿关注目标凑个分母出来。
-        val target = if (progress.target > 0) SettingsStore.get(this).current.followTarget else 0
+        // target == 0 是流程**明确声明「没有总量目标」**（直播互动、养号都这么发），
+        // 这时只能显示纯计数，不能拿关注目标凑个分母。
+        val current = SettingsStore.get(this).current
+        val live = progress.withLiveTarget(current.followTarget)
+        val target = live.target
 
-        b.floatStatus.text = shortStatus(progress, target)
+        b.floatStatus.text = shortStatus(live, target)
         b.floatState.text = progress.state.label
         // 按钮上直接带出当前目标值：即使计数还没刷新，用户也能立刻确认改动进去了
         b.floatSetTarget.text = if (target > 0) "设置 $target" else "设置关注"
@@ -531,8 +558,15 @@ class FloatWindowService : Service() {
         b.floatKnown.text = if (interacting) "藏 ${progress.collected}" else "已关 ${store.knownCount()}"
 
         val active = progress.state.isActive
-        b.floatToggle.visibility = if (active) View.VISIBLE else View.GONE
-        b.floatToggle.text = if (progress.state == EngineState.PAUSED) "继续" else "暂停"
+        // 三种暂停（手动 / 自愈等待）都显示「继续」；异常终止给「重试」；
+        // 风控停机**不给任何恢复入口**，只留「关闭」。
+        val canRetry = progress.state == EngineState.ERROR
+        b.floatToggle.visibility = if (active || canRetry) View.VISIBLE else View.GONE
+        b.floatToggle.text = when (progress.state) {
+            EngineState.PAUSED, EngineState.PAUSED_WAIT -> "继续"
+            EngineState.ERROR -> "重试"
+            else -> "暂停"
+        }
         b.floatFinish.text = if (active) "结束" else "关闭"
 
         lastRenderedTarget = target
@@ -599,12 +633,34 @@ class FloatWindowService : Service() {
         binding?.let { b -> runCatching { windowManager.removeView(b.root) } }
         binding = null
         params = null
+        if (instance === this) instance = null
         LogStore.i(TAG, "悬浮窗已移除")
         super.onDestroy()
     }
 
     companion object {
         private const val TAG = "悬浮窗"
+
+        /**
+         * 当前实例。仅用于**同进程**的一声招呼：抖关关界面回到前台时把面板收起来。
+         * 不加锁、不做消息通道——服务与 Activity 必然同进程，一句引用最省事。
+         */
+        @Volatile
+        private var instance: FloatWindowService? = null
+
+        /**
+         * App 回到前台时调用：把还展开着的面板收起来。
+         *
+         * 终态已经不在前台时展开了面板（那是给人在抖音里看结论用的），
+         * 用户切回抖关关后它正好压在参数区上——这里补上「回来就收起」，
+         * 与 observe 里「前台不展开」构成双保险。
+         */
+        fun collapseIfExpanded() {
+            val service = instance ?: return
+            if (!service.expanded) return
+            LogStore.d(TAG, "App 回到前台，自动收起悬浮面板（避免盖住参数区）")
+            service.setExpanded(false)
+        }
 
         /** 引擎从未启动时，悬浮窗最多空挂这么久 */
         private const val IDLE_SELF_CLOSE_MS = 5_000L

@@ -83,4 +83,18 @@ object EngineController {
         TaskEngine.stop(reason)
         if (context != null) FloatWindowService.stop(context)
     }
+
+    /**
+     * 用上一次的流程重新开一轮（悬浮窗终态的「重试」按钮）。
+     *
+     * 只该在 `ERROR` 上用：那表示「这次没做成」（抖音被拉走、定位一时失效），
+     * 重试是合理的。**风控停机不提供这个入口**——命中验证码/操作频繁还自动重试，
+     * 是最容易被判定成机器行为的事情。
+     */
+    fun restartLast(context: Context): Result<Unit> {
+        val flow = TaskEngine.lastFlow
+            ?: return Result.failure(IllegalStateException("没有可重试的流程，请回到 App 重新开始"))
+        LogStore.i(TAG, "重试上一次流程「${flow.name}」")
+        return start(context, flow)
+    }
 }

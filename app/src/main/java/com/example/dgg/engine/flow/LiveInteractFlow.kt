@@ -115,10 +115,18 @@ class LiveInteractFlow : Flow {
                 failures++
                 ctx.publish(message = "拿不到可发的评论内容（$failures/$MAX_CONTENT_FAILS）")
                 if (failures >= MAX_CONTENT_FAILS) {
-                    throw FlowAbortException(
-                        "连续 $MAX_CONTENT_FAILS 次生成不出可发的评论。" +
-                            "复制模式下通常是直播间没人说话、或 live_comment_line 与当前抖音版本不匹配"
-                    )
+                    // 与 M2「读不到评论」同一套处置（2026-10-29）：拿不到可复制的正文
+                    // 最常见的是评论区被浮层盖住、或直播间一时没人说话，
+                    // 都不是该结束任务的理由。暂停等待、持续探测，读到就自动恢复。
+                    failures = 0
+                    val recovered = RecoveryWait.waitForComments(
+                        ctx,
+                        "连续 $MAX_CONTENT_FAILS 次拿不到可发的评论内容"
+                    ) {
+                        if (buildComment(ctx, targets, settings, presets, lastComment) != null) 1 else 0
+                    }
+                    if (!recovered) return
+                    continue
                 }
                 ctx.settle(RETRY_WAIT_MS)
                 continue

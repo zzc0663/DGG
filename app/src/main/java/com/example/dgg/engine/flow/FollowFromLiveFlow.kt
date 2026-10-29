@@ -382,18 +382,37 @@ class FollowFromLiveFlow : Flow {
             val waited = SystemClock.uptimeMillis() - startAt
             if (scan.rows == 0) {
                 emptyRounds++
+                // **读不到评论的第一时间**就确认一次「是不是有浮层盖着」。
+                //
+                // 真机实测（2026-10-29）：手动点开礼物面板后，评论节点会从无障碍树里
+                // 整片消失，流程只能干等 4 轮（约 10~30 秒）才判异常——太迟钝。
+                // 这里只花一趟遍历（1.4s），认不出浮层就什么都不做（绝不误点），
+                // 认出来就关掉重读，通常 2~3 秒就能继续。
+                if (emptyRounds == 1) {
+                    val closed = LiveGuard.recoverOverlay(ctx)
+                    if (closed != null) {
+                        LogStore.i(TAG, "读不到评论，但屏幕上有「$closed」浮层，已关闭并重新读取")
+                        emptyRounds = 0
+                        ctx.settle(OVERLAY_RETRY_MS)
+                        continue
+                    }
+                }
                 if (emptyRounds >= MAX_DRY_ROUNDS) {
-                    val detection = ctx.detector.detect()
-                    throw FlowAbortException(
-                        "连续 $MAX_DRY_ROUNDS 次读不到直播间评论，已停止。" +
-                            "当前页面判定 ${detection.page.name}（${detection.score}/${detection.threshold}）。" +
-                            if (detection.page == PageState.LIVE_ROOM) {
-                                "人在直播间但读不到评论，多半是 live_comment_line 与当前抖音版本不匹配" +
-                                    "（见 docs/定位配置说明.md）"
-                            } else {
-                                "已不在直播间（可能被弹窗盖住），请重新进入目标直播间再开始"
-                            }
-                    )
+                    // 读不到评论**不再直接判死**（2026-10-29 需求）。
+                    //
+                    // 三类成因里只有「live_comment_line 与当前版本不匹配」是真故障，
+                    // 而礼物面板/观众列表盖住、转场加载这两种只要等一会儿就好。
+                    // 真故障也不该悄悄结束任务——暂停等待、持续探测，用户回来点一下
+                    // 「继续」就能接着跑，不用重新进直播间从头开始。
+                    val reason = "连续 $MAX_DRY_ROUNDS 次读不到直播间评论"
+                    emptyRounds = 0
+                    val recovered = RecoveryWait.waitForComments(ctx, reason) {
+                        // 探测用 seenRows 的**副本**：探测到的新评论不能被记成「已见」，
+                        // 否则恢复之后这些行不再是首见，白白漏掉一批刚说话的人。
+                        scanOnce(ctx, targets, store, handled, HashMap(seenRows)).rows
+                    }
+                    if (!recovered) return null
+                    continue
                 }
             } else {
                 emptyRounds = 0
@@ -410,9 +429,20 @@ class FollowFromLiveFlow : Flow {
             // 评论区「停住」时的正解：抖音会在底部浮出一个「99+条新消息」按钮，
             // 点它 = 让评论列表跳回最新。这是唯一的刷新入口——滑动是不行的（会切直播间），
             // 而干等它自己恢复实测要 2 分钟以上（19:53 那次等了 123 秒）。
+            //
+            // 这个 12 秒的节奏顺便当「定期体检」用：先看有没有浮层盖着。
+            // 观众列表是**半屏**浮层，页面判定依然是 LIVE_ROOM、评论行也可能还在树里，
+            // 不主动查就会一路等到 STALL_ABORT_MS（5 分钟）才报「房间安静」——
+            // 真机实测（2026-10-29）就是这个表现。
             if (waited - lastJumpAt >= JUMP_INTERVAL_MS) {
-                val stuck = if (waited >= 2_000) "评论区停在旧位置 ${waited / 1000}s" else "评论区未跟进最新"
                 lastJumpAt = waited
+                val closed = LiveGuard.recoverOverlay(ctx)
+                if (closed != null) {
+                    LogStore.i(TAG, "定期体检发现「$closed」浮层，已关闭并重新读取")
+                    ctx.settle(OVERLAY_RETRY_MS)
+                    continue
+                }
+                val stuck = if (waited >= 2_000) "评论区停在旧位置 ${waited / 1000}s" else "评论区未跟进最新"
                 val jumped = jumpToNewest(ctx)
                 if (jumped != null) {
                     LogStore.i(TAG, "$stuck，已点「$jumped」回到最新")
@@ -825,8 +855,11 @@ class FollowFromLiveFlow : Flow {
         const val MAX_COLLECT = 16
         const val MAX_BUTTON_SCAN = 8
 
-        /** 连续这么多次「一行评论都读不到」才判定定位失效（被浮层盖住 / 配置不匹配） */
+        /** 连这么多次「一行评论都读不到」才算读不到（被浮层盖住 / 配置不匹配） */
         const val MAX_DRY_ROUNDS = 4
+
+        /** 关掉意外浮层后等界面收起的时长（返回动画 + 评论重新挂上节点） */
+        const val OVERLAY_RETRY_MS = 1_000L
 
         /**
          * 只在最新的这么多个**可用**候选里随机挑人。

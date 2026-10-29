@@ -3,6 +3,7 @@ package com.example.dgg.engine.flow
 import android.os.SystemClock
 import com.example.dgg.data.LogStore
 import com.example.dgg.engine.FlowContext
+import com.example.dgg.engine.OverlayRule
 import com.example.dgg.engine.PageState
 import com.example.dgg.engine.Target
 import com.example.dgg.util.DouyinLauncher
@@ -78,12 +79,6 @@ object LiveGuard {
     private val OVERLAY_PAGES = setOf(PageState.USER_PROFILE)
 
     /**
-     * 页面判定掉成 UNKNOWN 时，用这些文案识别「有浮层盖住了直播间」。
-     * 只做精确 text 匹配，避免误伤正文里带这些字的正常评论。
-     */
-    private val OVERLAY_HINTS = listOf("赠送", "资料卡", "发送")
-
-    /**
      * 确保「正在抖音的某个直播间里」。
      *
      * @param allowAutoNavigate 允许「首页 → 直播页签 → 进房」的自动导航。
@@ -115,16 +110,20 @@ object LiveGuard {
             // 抖音的「直播频道」预览页会被判成 UNKNOWN（页面规则只命中「首页/朋友」5/6），
             // 但它上面就摆着进房按钮：先试一次，别为了等页面判定干耗 30 秒。
             if (enterFromLiveFeed(ctx)) return true
-            // 反过来，礼物面板 / 评论键盘这些浮层也会把页面判成 UNKNOWN。
+            // 反过来，礼物面板 / 观众列表 / 评论键盘这些浮层也会把页面判成 UNKNOWN。
             // 不认出来的话就只能干等到超时中止，比旧版「按返回关掉」更差。
-            val overlay = detectOverlay(ctx)
-            if (overlay != null) {
-                LogStore.w(TAG, "页面读不出来，但屏幕上有「$overlay」浮层，按一次返回关掉")
-                ctx.actions.back()
+            val closed = recoverOverlay(ctx)
+            if (closed != null) {
                 if (awaitRoom(ctx, DISMISS_SETTLE_MS) == PageState.LIVE_ROOM) {
-                    LogStore.i(TAG, "关掉「$overlay」浮层后回到了直播间")
+                    LogStore.i(TAG, "关掉「$closed」浮层后回到了直播间")
                     return true
                 }
+                // 浮层关掉了却没回到直播间（多为 live 面板吃掉了返回键、退到了预览页或首页）。
+                // **不要接着按第二次返回**——那只会退得更远。跳出重试循环，
+                // 交给下面的落点处置：预览页点进房、首页不抢、其它页返回 false。
+                page = ctx.detector.detect().page
+                LogStore.w(TAG, "关掉「$closed」后落在 ${page.name}，交给落点处置（不再按返回）")
+                break
             }
             LogStore.w(
                 TAG,
@@ -199,15 +198,55 @@ object LiveGuard {
     }
 
     /**
-     * 识别「压在直播间上、按一次返回就能关掉」的浮层。
+     * 识别并关掉「压在直播间上、按一次返回就能关掉」的浮层。
      *
-     * 走一次快照在内存里比对（不做三次 find）：这几个文案分别来自礼物面板（「赠送」把
-     * 2999 钻礼物选中后唯一的按钮）、评论快捷操作栏（「资料卡」）、评论输入面板（「发送」）。
-     * 它们的共同点是**出现时页面判定会掉成 UNKNOWN**——因为直播间的四大特征被盖住了。
+     * 规则来自 `douyin_locator.json` 的 `overlays` 段（加权多特征，2026-10-29 真机取证）：
+     * 礼物面板、观众列表、长按菜单、资料卡、评论键盘。
+     *
+     * ⚠️ **不要用「页面判定不是 LIVE_ROOM」当前置条件**。真机实测：点右上角人数弹出的
+     * 观众列表是**半屏**面板，屏幕上主播名、在线观众数、热度榜全都还在，页面判定依然是
+     * `LIVE_ROOM`——按页面判定做门禁，这个最常见的一次误触就永远修不掉。
+     * 安全性改由「阈值 + 文案唯一性」保证：正常直播间里这些特征一条都凑不够分
+     * （礼物面板要 5 分，而直播间最多只能靠评论里偶然出现的「钻」拿 2 分）。
+     *
+     * **只按返回，绝不点浮层里的任何控件**：礼物面板里每个可点元素都是
+     * 「选礼物 / 赠送 / 充值」。`Actions.tapNode` 的付费守卫只能是最后一道保险，
+     * 不能当成第一道。
+     *
+     * @return 关掉的浮层名；null = 屏幕上没有可识别的浮层
      */
-    private fun detectOverlay(ctx: FlowContext): String? {
+    suspend fun recoverOverlay(ctx: FlowContext): String? {
+        // 不在抖音前台时按返回，退掉的是别人家的界面
+        if (!ctx.actions.isDouyinForeground()) return null
+
+        // 一趟全树遍历（这台真机 1.4s），所有特征都在这份快照上比对
         val facts = ctx.actions.snapshot(ttlMs = 0)
-        return OVERLAY_HINTS.firstOrNull { hint -> facts.any { it.text == hint } }
+        if (facts.isEmpty()) return null
+
+        var best: OverlayRule? = null
+        var bestScore = 0
+        for (rule in ctx.config.overlays.values) {
+            val score = rule.features.sumOf { feature ->
+                if (facts.any { ctx.actions.matchesFacts(it, feature.target) }) feature.weight else 0
+            }
+            if (score >= rule.threshold && score > bestScore) {
+                best = rule
+                bestScore = score
+            }
+        }
+        val rule = best ?: return null
+
+        // 只在真的要动手时才算一次页面判定（复用上面那份快照缓存），纯粹为了日志好读
+        val page = ctx.detector.detect().page
+        LogStore.w(
+            TAG,
+            "识别到「${rule.label}」浮层（$bestScore/${rule.threshold}，当前判定 ${page.name}），按一次返回关闭"
+        )
+        if (!ctx.actions.back()) {
+            LogStore.w(TAG, "返回键没生效，「${rule.label}」可能还在（下一轮会重试）")
+            return null
+        }
+        return rule.label
     }
 
     /**

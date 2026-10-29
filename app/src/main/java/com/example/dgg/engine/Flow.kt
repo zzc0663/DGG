@@ -46,7 +46,13 @@ class FlowContext(
     val settings: Settings,
     private val mutate: ((EngineProgress) -> EngineProgress) -> Unit,
     private val stopFlag: () -> Boolean,
-    private val resumeWaiter: suspend () -> Unit
+    private val resumeWaiter: suspend () -> Unit,
+    /** 自愈暂停：把任务挂到 `PAUSED_WAIT`（任务不死，后台继续探测） */
+    private val pauseAuto: (String) -> Unit = {},
+    /** 自愈恢复：探测成功或用户点「继续」后回到 `RUNNING` */
+    private val resumeAuto: () -> Unit = {},
+    /** 当前是否处于暂停。自愈等待循环据此感知「用户已经手动点了继续」 */
+    private val pausedFlag: () -> Boolean = { false }
 ) {
 
     fun publish(
@@ -150,6 +156,27 @@ class FlowContext(
     suspend fun awaitResume() = resumeWaiter()
 
     fun stopped(): Boolean = stopFlag()
+
+    // ==================== 自愈暂停 ====================
+
+    /**
+     * 挂起任务并声明原因（`PAUSED_WAIT`）。
+     *
+     * 语义与手动暂停一致，只是**会自己恢复**：调用方在 [pauseForRecovery] 之后
+     * 自己循环探测（见 `RecoveryWait`），探测成功就 [resumeFromRecovery]。
+     * 用户在悬浮窗/通知栏点「继续」同样能让等待循环退出——所以这里不阻塞。
+     */
+    fun pauseForRecovery(reason: String) = pauseAuto(reason)
+
+    fun resumeFromRecovery() = resumeAuto()
+
+    /**
+     * 当前是否暂停。
+     *
+     * 自愈等待循环用它判断「用户是不是已经手动点了继续」：
+     * 一旦变成 false，说明有人接管了，循环要立刻让出控制权、别再拦着流程。
+     */
+    fun isPaused(): Boolean = pausedFlag()
 
     suspend fun waitForPage(page: PageState, timeoutMs: Long, pollMs: Long = 200): Boolean {
         val deadline = SystemClock.uptimeMillis() + timeoutMs
