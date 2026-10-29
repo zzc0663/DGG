@@ -454,6 +454,43 @@ class Actions(
     }
 
     /**
+     * 一趟遍历里同时试多个候选文案，**命中第一个就返回**。
+     *
+     * 为什么需要它：`snapshot()` 会把每个节点的 text/desc/id/editable/四个 bounds 全读一遍
+     * （7 次跨进程调用/节点，647 节点实测 1.4s）；而「找浮标」只需要比较文案，
+     * 走这里大约是 snapshot 的 1/4~1/3。逐个 `find` 更差——有几个文案就要几趟。
+     *
+     * ⚠️ 命中可能是「带这串字的容器」而不是文本节点本身（BFS 父节点在前）。
+     * 抖音的「N条新消息」胶囊容器就是那个胶囊（实测 198×53），点它中心仍在胶囊内，
+     * 所以这里不做「取面积最小」那一步——省下来的正是一趟 snapshot。
+     */
+    fun findFirst(texts: List<String>): AccessibilityNodeInfo? {
+        if (texts.isEmpty()) return null
+        val start = root() ?: return null
+        return findBy(start) { node ->
+            if (!isOnScreen(node)) return@findBy false
+            val text = textOf(node)
+            if (!text.isNullOrEmpty() && texts.any { text.contains(it) }) return@findBy true
+            val desc = descOf(node)
+            !desc.isNullOrEmpty() && texts.any { desc.contains(it) }
+        }
+    }
+
+    /**
+     * 按 view id 找节点（`com.ss.android.ugc.aweme:id/r68` → 传 `"r68"`）。
+     *
+     * 走 framework 的 `findAccessibilityNodeInfosByViewId`，它是原生递归实现，
+     * 比自己用 Kotlin BFS 一节点一节点问要快数倍——「关注后 1 秒内完成下滑」全靠这一步。
+     * 找不到（抖音改版换了混淆 id）返回 null，调用方必须留遍历兜底。
+     */
+    fun findByViewId(id: String): AccessibilityNodeInfo? {
+        val start = root() ?: return null
+        val full = if (id.contains(":id/")) id else (start.packageName?.toString() ?: "") + ":id/" + id
+        val nodes = runCatching { start.findAccessibilityNodeInfosByViewId(full) }.getOrNull()
+        return nodes?.firstOrNull { isOnScreen(it) }
+    }
+
+    /**
      * 找一个**没有可点控件**的空白落点。
      *
      * 点赞要双击画面，但直播间画面上浮着礼物飘屏、送礼用户头像、互动挂件这些临时元素，
