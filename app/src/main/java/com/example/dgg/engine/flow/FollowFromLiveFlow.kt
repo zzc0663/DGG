@@ -1,5 +1,6 @@
 package com.example.dgg.engine.flow
 
+import android.graphics.Rect
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.dgg.data.FollowedStore
@@ -233,7 +234,7 @@ class FollowFromLiveFlow : Flow {
                     closeCard(ctx, targets, knownOpen = true)
                     // 关掉弹层后评论区同样脱离了底部，顺手拉回最新，
                     // 免得下一次扫描还在看这几个已经关注过的人
-                    refreshComments(ctx, "跳过已关注的「$nickname」")
+                    refreshComments(ctx, targets, "跳过已关注的「$nickname」")
                     continue
                 }
 
@@ -296,7 +297,7 @@ class FollowFromLiveFlow : Flow {
                     ) {
                         // 休息前也先把评论区拉回最新：要歇几分钟，不能让列表停在旧位置
                         // （列表一旦贴着最新，休息期间新评论会自己滚上来）
-                        waitAfterFollow(ctx, 0L, "关注「$nickname」成功") { false }
+                        waitAfterFollow(ctx, targets, 0L, "关注「$nickname」成功") { false }
                         ctx.publish(message = "已关注 $followed 个，按设置休息 ${settings.restSeconds}s")
                         LogStore.i(TAG, "到达休息点（每 ${settings.restAfterN} 个），休息 ${settings.restSeconds}s")
                         ctx.settle(settings.restSeconds * 1_000L)
@@ -304,7 +305,7 @@ class FollowFromLiveFlow : Flow {
                         // 间隔可能长达 60 分钟：分片等待，暂停/停止才收得到。
                         // 每片顺便看一眼设置：用户在等待期间改了目标数就提前结束，
                         // 不然他要等满这一小时才看到改动生效。
-                        waitAfterFollow(ctx, settings.scanIntervalMs, "关注「$nickname」成功") {
+                        waitAfterFollow(ctx, targets, settings.scanIntervalMs, "关注「$nickname」成功") {
                             val now = SettingsStore.get(ctx.appContext).current
                             now.followTarget != lastSeenTargetSetting ||
                                 now.dailyLimit != lastSeenDailyLimit
@@ -482,6 +483,11 @@ class FollowFromLiveFlow : Flow {
                     ctx.settle(JUMP_SETTLE_MS)
                     continue
                 }
+                // 没有浮标：人少的直播间不会浮浮标，直接滚一下评论容器把已有的新评论露出来。
+                // diagnose = false：这里每隔 12 秒就会跑一次，不必每次都做前后快照取证。
+                if (scrollCommentsToNewest(ctx, targets, stuck, SystemClock.uptimeMillis(), diagnose = false)) {
+                    continue
+                }
             }
 
             if (waited - lastReportAt >= REPORT_INTERVAL_MS) {
@@ -548,20 +554,143 @@ class FollowFromLiveFlow : Flow {
      *
      * 找不到浮标 = 房间真的没有新评论（或列表还贴着底部），返回 false，**绝不盲点坐标**。
      */
-    private suspend fun refreshComments(ctx: FlowContext, reason: String): Boolean {
+    private suspend fun refreshComments(
+        ctx: FlowContext,
+        targets: LiveTargets,
+        reason: String
+    ): Boolean {
         val startedAt = SystemClock.uptimeMillis()
+
+        // ① 首选：点「N条新消息」浮标（最快，且是抖音官方给的「回到最新」入口）
         val jumped = jumpToNewest(ctx)
-        if (jumped == null) {
-            LogStore.d(TAG, "$reason → 评论区没有「新消息」浮标（列表还贴着底部），无需刷新")
+        if (jumped != null) {
+            // 给列表一点时间跳回最新再继续，否则下一轮扫描读到的还是旧位置的行
+            ctx.settle(JUMP_SETTLE_MS)
+            LogStore.i(
+                TAG,
+                "$reason → 已点「$jumped」把评论区拉回最新（耗时 ${SystemClock.uptimeMillis() - startedAt}ms）"
+            )
+            return true
+        }
+
+        // ② 兜底：滚评论容器（人少的直播间不会浮浮标）
+        return scrollCommentsToNewest(ctx, targets, reason, startedAt)
+    }
+
+    /**
+     * 没有「N条新消息」浮标时，把评论区朝**最新方向**再滚一段。
+     *
+     * 为什么需要它：浮标要攒够几条新评论才浮出来（抖音的行为），人少的直播间经常
+     * 一整分钟都浮不出来——关注完一个人，屏幕上还是那几条旧评论，看着像卡住。
+     * 这时列表其实可能已经追加了 1~2 条新评论在可视区下方，滚一下就能露出来。
+     *
+     * **为什么用 `ACTION_SCROLL_FORWARD` 而不是手势**：抖音直播间的整页是竖向 ViewPager，
+     * 手指从下往上就是「切下一个直播间」（docs/M2 §12.2 实测 550px 切房）。
+     * SCROLL 动作直接发给评论容器，不产生全局手势，物理上不可能切房。
+     *
+     * 仍然做了两道保险：
+     * 1. 只接受「高度 ≤ 55% 屏高、中心落在评论区范围内」的可滚动节点（排除整页容器）；
+     * 2. 滚完比对**当前主播昵称**，变了就立刻暂停——宁可停下也不在别人的房间里乱点。
+     */
+    private suspend fun scrollCommentsToNewest(
+        ctx: FlowContext,
+        targets: LiveTargets,
+        reason: String,
+        startedAt: Long,
+        /** true = 额外做「滚动前后评论行 y 变化」的取证（两趟快照，约 3s）；默认关，见 [SCROLL_DIAGNOSE] */
+        diagnose: Boolean = SCROLL_DIAGNOSE
+    ): Boolean {
+        val area = commentScrollArea(ctx, targets)
+        if (area.height() < MIN_SCROLL_AREA_HEIGHT) {
+            LogStore.d(TAG, "$reason → 评论区可视范围太小（${area.height()}px），不下滑")
             return false
         }
-        // 给列表一点时间跳回最新再继续，否则下一轮扫描读到的还是旧位置的行
-        ctx.settle(JUMP_SETTLE_MS)
+
+        val container = ctx.actions.scrollableIn(area)
+        if (container == null) {
+            // 只做「控件滚动」：整屏手势在这里是切房的高危动作（docs/M2 §12.2 实测 550px 切房），
+            // 没有实测数据前不启用。这条日志就是取证入口。
+            LogStore.i(
+                TAG,
+                "$reason → 评论区里没有可滚动容器" +
+                    "（范围 x${area.left}~${area.right} y${area.top}~${area.bottom}），本轮不下滑"
+            )
+            return false
+        }
+
+        val before = if (diagnose) commentRowTops(ctx) else emptyMap()
+        val anchorBefore = CurrentRoomAnchor.anchorFromSnapshot(ctx.actions)
+        if (!ctx.actions.scrollForward(container, "评论区")) {
+            LogStore.d(TAG, "$reason → 系统拒绝了滚动动作（列表已到最新一屏），本轮不下滑")
+            return false
+        }
+        ctx.settle(SCROLL_SETTLE_MS)
+
+        // 防切房：滚动不该改变房间，改了说明动作落到了别的容器上
+        val anchorAfter = CurrentRoomAnchor.anchorFromSnapshot(ctx.actions)
+        if (anchorBefore != null && anchorAfter != null && anchorBefore != anchorAfter) {
+            LogStore.e(
+                TAG,
+                "下滑后主播从「$anchorBefore」变成「$anchorAfter」——疑似切到了别的直播间，立即暂停"
+            )
+            ctx.pauseForRecovery("下滑评论区时疑似切换了直播间（$anchorBefore → $anchorAfter）")
+            return false
+        }
+
+        if (!diagnose) {
+            LogStore.d(TAG, "$reason → 已滚动评论区，重新读取")
+            return true
+        }
+
+        // 方向取证：共同行的 y 变化为负 = 内容上移 = 露出的是更靠后的（更新）评论
+        val after = commentRowTops(ctx)
+        val shared = before.keys.intersect(after.keys)
+        val dy = if (shared.isEmpty()) 0 else shared.sumOf { after.getValue(it) - before.getValue(it) } / shared.size
         LogStore.i(
             TAG,
-            "$reason → 已点「$jumped」把评论区拉回最新（耗时 ${SystemClock.uptimeMillis() - startedAt}ms）"
+            "$reason → 已滚动评论区（容器 ${container.viewIdResourceName ?: "无id"}，" +
+                "共同行 ${shared.size} 条、平均 y 变化 $dy（负=内容上移/更靠最新），" +
+                "新增 ${(after.keys - before.keys).size} 行、消失 ${(before.keys - after.keys).size} 行，" +
+                "耗时 ${SystemClock.uptimeMillis() - startedAt}ms）"
         )
-        return true
+        return dy != 0 || after.keys != before.keys
+    }
+
+    /**
+     * 评论区可滚动的范围：从画面中段到输入栏上方，右侧留出按钮栏。
+     *
+     * 右侧必须避开：点赞/评论/分享/礼物那一列在屏幕最右边，落进去等于点了别的功能。
+     * 下边界直接复用 [rowBottomLimit]（输入栏顶 - 余量），与「评论行不能被输入栏压住」
+     * 用的是同一条线，不会出现两套坐标。
+     */
+    private fun commentScrollArea(ctx: FlowContext, targets: LiveTargets): Rect {
+        val h = ctx.actions.screenHeight()
+        val w = ctx.actions.screenWidth()
+        return Rect(
+            (w * 0.06f).toInt(),
+            (h * COMMENT_AREA_TOP_RATIO).toInt(),
+            (w * 0.62f).toInt(),
+            rowBottomLimit(ctx, targets)
+        )
+    }
+
+    /**
+     * 屏上评论行的「文案 → 上边缘 y」，用来判断滚动方向（内容上移还是下移）。
+     *
+     * 用一份新的快照纯读，不碰 [seenRows]，也不改变任何状态。
+     */
+    private fun commentRowTops(ctx: FlowContext): Map<String, Int> {
+        val lineTarget = ctx.config.target("live_comment_line")
+            ?: ctx.config.target("live_comment_nickname")
+            ?: return emptyMap()
+        return ctx.actions.snapshot(ttlMs = 0)
+            .asSequence()
+            .filter { it.bottom > it.top && ctx.actions.matchesFacts(it, lineTarget) }
+            .mapNotNull { fact ->
+                val text = fact.text?.trim()
+                if (text.isNullOrEmpty()) null else text to fact.top
+            }
+            .toMap()
     }
 
     /**
@@ -581,6 +710,7 @@ class FollowFromLiveFlow : Flow {
      */
     private suspend fun waitAfterFollow(
         ctx: FlowContext,
+        targets: LiveTargets,
         intervalMs: Long,
         reason: String,
         shouldInterrupt: () -> Boolean
@@ -590,7 +720,7 @@ class FollowFromLiveFlow : Flow {
         // ① 先刷新。间隔太短（< 3s）时不值得为它插一段探测，交给下一轮的即时刷新兜底
         if (intervalMs == 0L || intervalMs >= REFRESH_MIN_INTERVAL_MS) {
             ctx.settle(REFRESH_PROBE_MS)
-            if (!shouldInterrupt()) refreshComments(ctx, reason)
+            if (!shouldInterrupt()) refreshComments(ctx, targets, reason)
         }
 
         // ② 补足剩余间隔。间隔可能长达 60 分钟，必须分片等待，暂停/停止才收得到
@@ -1056,7 +1186,7 @@ class FollowFromLiveFlow : Flow {
         // 两个调用点都刚在弹层里读到私密证据，弹层必然还在
         closeCard(ctx, targets, knownOpen = true)
         // 拉回最新：不刷新的话这个人会一直留在屏幕上，下一次扫描还得再判一遍
-        refreshComments(ctx, "私密账号「$nickname」跳过")
+        refreshComments(ctx, targets, "私密账号「$nickname」跳过")
     }
 
     /**
@@ -1177,6 +1307,29 @@ class FollowFromLiveFlow : Flow {
 
         /** 扫描间隔小于这个值时不插探测：间隔本身就短，交给下一轮的即时刷新兜底 */
         const val REFRESH_MIN_INTERVAL_MS = 3_000L
+
+        /**
+         * 评论可滚动区域的**上边界**占屏比。
+         *
+         * 0.42 是「主播画面下半部」的位置：再往上就是直播间头部（头像/关注/在线人数），
+         * 那里也有可点控件；再往下就压到输入栏。实测评论行集中在 0.55~0.93。
+         */
+        const val COMMENT_AREA_TOP_RATIO = 0.42f
+
+        /** 可滚动区域太矮（< 160px，约 3 行）就别滚了，滚一屏也只会滚过一条 */
+        const val MIN_SCROLL_AREA_HEIGHT = 160
+
+        /** 滚动动作之后等列表把新内容画上去 */
+        const val SCROLL_SETTLE_MS = 900L
+
+        /**
+         * 是否在滚动前后各抓一趟快照、打印「共同行 y 变化 / 新增行数」的取证日志。
+         *
+         * 默认**关**：这两趟快照要 2.8 秒，而方向已经在真机上连续取证三次
+         * （-231 / -103 / -236 px，负值 = 内容上移 = 露出更新的评论），不必每轮都验。
+         * 需要重新取证（抖音改版后怀疑方向反了）时把它改成 true 再打一个包即可。
+         */
+        const val SCROLL_DIAGNOSE = false
 
         /** 评论行下边界 = 输入栏顶 - 这个余量（实测最新一行底部 2170、输入栏顶 2188） */
         const val ROW_LIMIT_MARGIN = 8

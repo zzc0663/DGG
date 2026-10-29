@@ -581,9 +581,49 @@ class Actions(
         )
     }
 
+    /**
+     * 在指定区域内找一个**可滚动容器**。
+     *
+     * 存在的意义：人少的直播间不会浮「N条新消息」浮标（抖音要攒够几条才浮），
+     * 想让列表往最新方向再走一段就只能自己滚。而**绝对不能用整屏手势滑**——
+     * 抖音直播间的整页是竖滑 ViewPager，「手指从下往上」直接切到下一个直播间
+     * （docs/M2 §12.2 记着 550px 就切房）。用无障碍的 SCROLL 动作作用在评论容器上，
+     * 走的是控件内部滚动，不产生任何全局手势，因此不可能触发切房。
+     *
+     * 三条筛选，缺一不可（否则可能滚到 ViewPager 上）：
+     * 1. `isScrollable`；
+     * 2. 中心点落在 [area] 内（评论区范围内）；
+     * 3. 高度不超过屏高的 [maxHeightRatio] —— 整页容器高度接近满屏，必须排除。
+     */
+    fun scrollableIn(area: Rect, maxHeightRatio: Float = 0.55f): AccessibilityNodeInfo? {
+        val start = root() ?: return null
+        val maxHeight = (screenHeight() * maxHeightRatio).toInt()
+        return findBy(start) { node ->
+            if (!node.isScrollable) return@findBy false
+            val b = boundsOf(node)
+            if (b.width() <= 0 || b.height() <= 0 || b.height() > maxHeight) return@findBy false
+            area.contains(b.centerX(), b.centerY())
+        }
+    }
+
+    /**
+     * 让一个容器向内滚动一屏（末尾方向）。
+     *
+     * 走 `ACTION_SCROLL_FORWARD` 而不是手势：手势会落到全局 ViewPager 上切直播间，
+     * 而 SCROLL 动作只发给目标控件，安全且可重复。
+     *
+     * @return true = 系统接受了动作（注意：**已滚到底时也可能返回 true 但内容不动**，
+     *         所以调用方必须自己比对滚动前后的内容，不能只信返回值）
+     */
+    suspend fun scrollForward(node: AccessibilityNodeInfo, label: String): Boolean {
+        val ok = node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+        LogStore.d(TAG, "滚动 $label 向末尾 → $ok")
+        if (ok) invalidateSnapshot()
+        return ok
+    }
+
     /** 多段折线滑动：段数与横向漂移都随机，避免出现笔直的机器轨迹 */
-    suspend fun swipe(fromX: Int, fromY: Int, toX: Int, toY: Int): Boolean {
-        val segments = humanizer.swipeSegments()
+    suspend fun swipe(fromX: Int, fromY: Int, toX: Int, toY: Int): Boolean {        val segments = humanizer.swipeSegments()
         val drift = (abs(toY - fromY) * DRIFT_RATIO).toInt().coerceAtLeast(4)
 
         val path = Path().apply { moveTo(fromX.toFloat(), fromY.toFloat()) }
