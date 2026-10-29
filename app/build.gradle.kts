@@ -16,6 +16,7 @@ val frozenApplicationId = providers.gradleProperty("dgg.applicationId")
 val releaseApiBaseUrl = providers.gradleProperty("dgg.apiBaseUrl")
     .orElse("https://api.example.com/")
     .get()
+val explicitVersionCode = providers.gradleProperty("dgg.versionCode").orNull
 val frozenVersionCode = providers.gradleProperty("dgg.versionCode")
     .orElse("2")
     .get()
@@ -23,6 +24,19 @@ val frozenVersionCode = providers.gradleProperty("dgg.versionCode")
 val frozenVersionName = providers.gradleProperty("dgg.versionName")
     .orElse("1.1")
     .get()
+
+// ⚠️ 只要显式指定了版本号（= 这是一次真正的发布构建），就必须同时指定服务端地址。
+//
+// 踩过：2026-10-29 连着打了两个包都只传了 -Pdgg.versionCode/versionName，
+// 结果 API_BASE_URL 悄悄落回占位值 https://api.example.com/——能编译、能安装、
+// 甚至能跑（授权 token 有本地缓存），但授权握手 / OTA / 日志上报全部指向不存在的域名。
+// 这种包发出去没人能一眼看出来，只能在服务端日志里发现「这个设备从没来过」。
+if (explicitVersionCode != null && releaseApiBaseUrl.contains("api.example.com")) {
+    throw GradleException(
+        "release 构建必须同时指定服务端地址：-Pdgg.apiBaseUrl=http://<host>:<port>/ " +
+            "（当前仍是占位值 $releaseApiBaseUrl）"
+    )
+}
 
 android {
     namespace = "com.example.dgg"

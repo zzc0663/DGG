@@ -1,5 +1,6 @@
 package com.example.dgg.data.ota
 
+import com.example.dgg.BuildConfig
 import com.example.dgg.data.LogStore
 import org.json.JSONObject
 
@@ -16,7 +17,7 @@ data class OtaManifest(
     /** 新版 versionCode，必须 > 当前（等于或小于一律当"无更新"，绝不降级安装） */
     val versionCode: Int,
     val versionName: String,
-    /** 安装包直链，必须是 https（仅回环地址允许 http，供本地联调） */
+    /** 安装包直链：https / 回环 http / 与自己 API 同源的 http（见 [OtaUrls]） */
     val url: String,
     /** 64 位小写十六进制，下载后逐字节校验 */
     val sha256: String,
@@ -75,7 +76,7 @@ data class OtaManifest(
                 return null
             }
             if (!OtaUrls.isAllowed(url)) {
-                LogStore.w(TAG, "manifest 不可用：url 不是 https 或不可解析（$url）")
+                LogStore.w(TAG, "manifest 不可用：url 既不是 https、也不是回环或同源 http（$url）")
                 return null
             }
             if (!SHA256_PATTERN.matches(sha256)) {
@@ -100,11 +101,19 @@ data class OtaManifest(
 /**
  * 下载地址的白名单规则。
  *
- * 只允许 https，**唯一的例外是回环地址**：本地联调时用
- * `python -m http.server` + `adb reverse tcp:8099 tcp:8099`，
- * 手机访问 `http://127.0.0.1:8099/xxx.apk` 就能把整条下载链路跑通，不必等云端。
+ * 允许三类：
+ * 1. `https://` 任意地址；
+ * 2. 回环地址 `http://127.0.0.1:…`、`http://localhost:…`：本地联调时用
+ *    `python -m http.server` + `adb reverse` 把整条链路跑通，不必等云端；
+ * 3. **与 `BuildConfig.API_BASE_URL` 同源**的 `http://` 地址。
  *
- * 放行回环不会削弱安全性：回环只能连到设备自己，且装包前还有签名一致性校验兜底。
+ * 第 3 条是 2026-10-29 加的：测试服只有 3101 明文端口（没有 80/443、没装 nginx），
+ * 而 OTA 下发的直链就是 `http://8.163.92.58:3101/api/v1/ota/download/…`。
+ * 只认 https 的结果是**明文环境下永远查不到更新**——入口点了也只会说"无法连接"。
+ *
+ * 安全性没有实质下降：只放行**自己的服务器**（同 scheme+host+port），
+ * 且装包前仍有 `OtaVerifier` 的四道校验（包名 / 与已装应用逐字节一致的签名 /
+ * sha256 / versionCode 递增）兜底，下载到被改过的包也装不上。
  */
 internal object OtaUrls {
 
@@ -112,10 +121,33 @@ internal object OtaUrls {
         if (url.isEmpty()) return false
         val lower = url.lowercase()
         if (lower.startsWith("https://")) return true
-        if (lower.startsWith("http://")) return isLoopback(lower)
+        if (lower.startsWith("http://")) return isLoopback(lower) || isApiOrigin(lower)
         return false
     }
 
     private fun isLoopback(url: String): Boolean =
         url.startsWith("http://127.0.0.1:") || url.startsWith("http://localhost:")
+
+    /**
+     * 是否与 API 基址同源（scheme + host + port）。
+     *
+     * 用「同源前缀 + 边界字符」而不是 `contains`：`http://8.163.92.58:3101` 不能匹配
+     * `http://8.163.92.58:31011/x`（端口被前缀吞掉会放行一个完全不同的服务）。
+     */
+    private fun isApiOrigin(url: String): Boolean {
+        val origin = apiOrigin() ?: return false
+        if (!url.startsWith(origin)) return false
+        if (url.length == origin.length) return true
+        val next = url[origin.length]
+        return next == '/' || next == '?'
+    }
+
+    private fun apiOrigin(): String? {
+        val base = BuildConfig.API_BASE_URL.trim().trimEnd('/')
+        if (!base.lowercase().startsWith("http://")) return null
+        val schemeEnd = base.indexOf("://") + 3
+        if (schemeEnd < 3) return null
+        val slash = base.indexOf('/', schemeEnd)
+        return (if (slash < 0) base else base.substring(0, slash)).lowercase()
+    }
 }

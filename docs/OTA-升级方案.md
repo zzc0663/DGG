@@ -124,7 +124,7 @@ Header: If-None-Match: <etag>
 |---|---|---|
 | `versionCode` | ✅ | ≤ 当前版本 → **视为无更新**（不做降级安装） |
 | `versionName` | ✅ | 仅展示 |
-| `url` | ✅ | **必须 https**（仅 127.0.0.1 允许 http，供本地联调）；否则拒绝并记日志 |
+| `url` | ✅ | https / 回环 http / **与自己 API 同源**的 http（`scheme+host+port` 全等，见 §12）；否则拒绝并记日志 |
 | `size` | ⭕ | 仅用于进度显示；**不用于校验** |
 | `sha256` | ✅ | 下载后逐字节校验，不匹配即删包重下（最多 2 次） |
 | `changelog` | ⭕ | 展示，超长截断 |
@@ -395,3 +395,63 @@ sha256 `21c494b2…10c1c156`，`adb reverse` + 本地 HTTP 提供。
 
 **不含**：安装（`OtaInstaller`）、UI、前台下载服务、静默检查开关 —— 属 P2/P3。
 
+
+---
+
+## 12. 手动入口与「明文服务器」的放行（2026-10-29，vc18 / 1.3.1）
+
+### 12.1 两个必须一起解决的前提
+
+上线前 OTA 处于「代码齐全但链路不通」的状态，卡在两处，只改一处仍然查不到更新：
+
+| 卡点 | 表现 |
+|---|---|
+| `tv_update` 默认 `GONE`，且 `checkOta(manual=true)` 绑在它身上 | **没有更新的时候，用户没有任何地方能主动查一次**（这是死循环：要先发现更新才出现检查按钮） |
+| `OtaUrls.isAllowed` 只放行 https + 回环 | 测试服是 `http://8.163.92.58:3101`（无 80/443、没装 nginx），下发的直链永远被判非法 ⇒ 手动点了也只会说「无法连接」 |
+
+### 12.2 改法
+
+1. **头顶常驻版本号**：标题栏「抖关关」下面一行 `v<versionName> · 检查更新`，点击即
+   `checkOta(manual = true)`（不受 6 小时自动检查间隔限制）。检查期间文字临时变
+   `v… · 检查中…`，给即时反馈。
+2. **`OtaUrls` 增加第三类放行**：与 `BuildConfig.API_BASE_URL` **同源**（scheme + host + port 全等）的 http。
+   - 用「同源前缀 + 边界字符」判断，不用 `contains`：`http://8.163.92.58:3101` 不能匹配
+     `http://8.163.92.58:31011/x`（端口被前缀吞掉会放行一个完全不同的服务）。
+   - 安全性没有实质下降：只放行自己的服务器，且装包前仍有四道校验
+     （包名 / 与已装应用逐字节一致的签名 / sha256 / versionCode 递增）。
+3. **反馈要区分两种 null**：`OtaState.UpToDate` → 「已是最新版本 vX」；
+   `OtaState.Idle`（请求本身失败）→ 「连不上更新服务，请检查网络后重试」。
+   原来混成一句「已是最新版本，或暂时无法连接更新服务」，用户既不知道该不该重试，也判断不了状态。
+
+### 12.3 服务端要真的登记过版本
+
+`/v1/ota/latest` 只认 `app_releases` 里 `status = 'published'` 的记录；只把 APK 放进
+`public/dl/`（静态直链）**不会**让它出现在 OTA 里。登记走 admin API：
+
+```
+POST /api/v1/admin/auth/login        → cookie + csrf_token
+POST /api/v1/admin/releases          → multipart: file / app_code / channel / release_notes
+POST /api/v1/admin/releases/:id/publish
+```
+
+上传时会 `apksigner` 探签名，与应用登记的 `APP_SIGNING_CERT_SHA256` 不一致直接 422。
+
+### 12.4 真机全链路实测（ColorOS / vc17 → vc18）
+
+```
+头顶：v1.3.0 · 检查更新          ← 常驻
+点击 → 右上角亮起「升级 1.3.1」
+弹窗：发现新版本 / 新版本 1.3.1(18) / 大小 4.6 MB / 更新说明…
+点「立即更新」→（OtaService 前台下载 + 流式 sha256 校验）→ 右上角变「安装 1.3.1」
+点「安装」→ 系统安装器：安装信息收集提醒 → 继续安装 → 检测结果：涉及敏感权限 → 继续安装
+→ dumpsys: versionCode=18 versionName=1.3.1
+再点头顶：toast「已是最新版本 v1.3.1」，头顶变成 v1.3.1 · 检查更新
+```
+
+⚠️ ColorOS 的安装器有**两层**确认（收集提醒 + 敏感权限检测），`OtaInstaller` 只是把包交给
+系统，这两层必须由用户点。不是 bug，但引导文案里要说清楚。
+
+### 12.5 尚未做
+
+- 通知栏的下载进度目前只在 `OtaService` 里，安装完成后不自动回到 App（用户自己点回来）。
+- 没有「稍后提醒」以外的灰度/强制更新（契约里刻意不含 `force`）。

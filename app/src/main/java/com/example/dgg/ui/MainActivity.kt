@@ -33,6 +33,7 @@ import com.example.dgg.data.log.LogUploadReceipt
 import com.example.dgg.data.log.LogUploadState
 import com.example.dgg.data.log.RemoteLogUploadProvider
 import com.example.dgg.data.license.RemoteLicenseProvider
+import com.example.dgg.BuildConfig
 import com.example.dgg.data.ota.OtaInstaller
 import com.example.dgg.data.ota.OtaManager
 import com.example.dgg.data.ota.OtaManifest
@@ -836,7 +837,17 @@ class MainActivity : AppCompatActivity() {
             OtaManager.state.collect { renderOtaState(it) }
         }
         binding.tvUpdate.setOnClickListener { checkOta(manual = true) }
+
+        // 头顶的版本号就是手动检查入口。
+        //
+        // 以前唯一的手动入口是右上角那个 `tv_update`，而它默认 GONE、只有「已经发现新版本」
+        // 才显形——于是「没有更新」的时候，用户根本没有地方能主动查一次。
+        // 版本号常驻显示，点它即查（不受 6 小时的自动检查间隔限制）。
+        binding.tvVersion.text = versionLabel()
+        binding.tvVersion.setOnClickListener { checkOta(manual = true) }
     }
+
+    private fun versionLabel(): String = "v${BuildConfig.VERSION_NAME} · 检查更新"
 
     /** 授权可用后自动检查；6 小时内不重复，失败静默。 */
     private fun maybeAutoCheckOta() {
@@ -849,13 +860,34 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 检查更新。
+     *
+     * `manual = true` 时必须有明确的反馈，且要**区分两种 null**：
+     * - `OtaState.UpToDate` → 确实没有新版，说「已是最新版本」；
+     * - 其余（`Idle`）→ 请求本身失败（连不上 / 服务端维护），说「连不上更新服务」。
+     *
+     * 这两句混成一句「已是最新版本，或暂时无法连接更新服务」是没法排查的：
+     * 用户既不知道要不要重试，也不知道自己是不是已经是最新。
+     */
     private fun checkOta(manual: Boolean) {
+        if (manual) {
+            // 头顶版本号临时变成「检查中…」，给一个即时反馈（网络慢时不然像是没反应）
+            binding.tvVersion.text = "v${BuildConfig.VERSION_NAME} · 检查中…"
+        }
         uiScope.launch {
-            val manifest = OtaManager.check(this@MainActivity, manual)
-            if (manifest != null) {
-                showUpdatePrompt(manifest)
-            } else if (manual) {
-                toast("已是最新版本，或暂时无法连接更新服务")
+            try {
+                val manifest = OtaManager.check(this@MainActivity, manual)
+                if (manifest != null) {
+                    showUpdatePrompt(manifest)
+                } else if (manual) {
+                    when (OtaManager.state.value) {
+                        is OtaState.UpToDate -> toast("已是最新版本 v${BuildConfig.VERSION_NAME}")
+                        else -> toast("连不上更新服务，请检查网络后重试")
+                    }
+                }
+            } finally {
+                binding.tvVersion.text = versionLabel()
             }
         }
     }
