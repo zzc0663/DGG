@@ -131,6 +131,23 @@ class OtaService : Service() {
             enableVibration(false)
         }
         notificationManager.createNotificationChannel(channel)
+
+        // 完成通知单独一条通道，**必须 HIGH**。
+        //
+        // 之前「下载完成」也走上面那条 LOW：LOW 通道既不出横幅也没有提示音，
+        // 通知只静静地躺在通知栏里，用户在抖音里根本不会知道包已经下好了 ——
+        // 表现就是「下载完什么反应都没有」。HIGH 才会弹横幅 / 在状态栏浮出。
+        // 通道的重要性建好之后改不了，所以不能复用旧通道，只能新开一个 id。
+        val doneChannel = NotificationChannel(
+            CHANNEL_DONE_ID,
+            "更新就绪",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "新版本安装包下载完成，等待安装"
+            setShowBadge(true)
+            enableVibration(true)
+        }
+        notificationManager.createNotificationChannel(doneChannel)
     }
 
     private fun buildProgress(target: OtaManifest, done: Long, total: Long): Notification {
@@ -178,16 +195,29 @@ class OtaService : Service() {
     }
 
     private fun postFinished(target: OtaManifest, success: Boolean, detail: String?) {
+        val appName = getString(R.string.app_name)
         val notification = if (success) {
-            NotificationCompat.Builder(this, CHANNEL_ID)
+            // 点通知本体或「安装」按钮都直达安装：多一步「先打开 App 再找那个小字」，
+            // 用户就会一直挂着旧版本（实测 vc41 之前有人装了 3 天没升级）。
+            val install = installIntent(target)
+            NotificationCompat.Builder(this, CHANNEL_DONE_ID)
                 .setSmallIcon(R.drawable.ic_logo)
-                .setContentTitle("更新已就绪：${target.versionName}")
-                .setContentText("点开${getString(R.string.app_name)}，点右上角「安装」完成升级")
-                .setStyle(NotificationCompat.BigTextStyle().bigText("安装包已下载并通过校验，点开${getString(R.string.app_name)}后点「安装」完成升级。"))
-                .setContentIntent(openAppIntent())
+                .setContentTitle("更新已下载完成：${target.versionName}")
+                .setContentText("点「安装」立即升级（会重启$appName）")
+                .setStyle(
+                    NotificationCompat.BigTextStyle().bigText(
+                        "安装包已下载并通过校验（${formatBytes(target.size)}）。" +
+                            "点下面的「安装」直接打开系统安装器；也可以稍后从$appName 顶部的版本号进入。"
+                    )
+                )
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setDefaults(NotificationCompat.DEFAULT_ALL)
+                .setContentIntent(install)
+                .addAction(0, "安装", install)
+                .addAction(0, "稍后", openAppIntent())
                 .setAutoCancel(true)
-                .setOnlyAlertOnce(true)
-                .setShowWhen(false)
+                .setOnlyAlertOnce(false)
+                .setShowWhen(true)
                 .build()
         } else {
             NotificationCompat.Builder(this, CHANNEL_ID)
@@ -210,6 +240,26 @@ class OtaService : Service() {
         REQ_OPEN,
         Intent(this, MainActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
+    /**
+     * 「点通知就装」。
+     *
+     * 不在服务里直接 `OtaInstaller.install()`：那会绕过 Activity 的三项前置判断
+     * （任务是否在跑、安装未知应用是否已授权、弹窗该不该弹），用户在跑任务时会被
+     * 一个"请先停止任务"的 toast 打断却不知道发生了什么。回到 Activity 走统一入口。
+     */
+    private fun installIntent(target: OtaManifest): PendingIntent = PendingIntent.getActivity(
+        this,
+        REQ_INSTALL,
+        Intent(this, MainActivity::class.java)
+            .putExtra(MainActivity.EXTRA_INSTALL_NOW, target.versionCode)
+            .addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+            ),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 
@@ -265,9 +315,14 @@ class OtaService : Service() {
     companion object {
         private const val TAG = "OTA服务"
         private const val CHANNEL_ID = "dgg_ota"
+
+        /** 完成通知专用通道（IMPORTANCE_HIGH）。与进度通道分开是因为重要性建好之后改不了 */
+        private const val CHANNEL_DONE_ID = "dgg_ota_ready"
+
         private const val NOTIFICATION_ID = 1002
         private const val REQ_OPEN = 200
         private const val REQ_CANCEL = 201
+        private const val REQ_INSTALL = 202
         private const val EXTRA_MANIFEST = "manifest"
 
         const val ACTION_CANCEL = "com.doujiajia.app.action.OTA_CANCEL"

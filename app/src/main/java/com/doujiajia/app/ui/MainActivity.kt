@@ -20,6 +20,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
+import androidx.lifecycle.Lifecycle
 import com.doujiajia.app.R
 import com.doujiajia.app.data.LogStore
 import com.doujiajia.app.data.PermissionGuard
@@ -99,6 +100,20 @@ class MainActivity : AppCompatActivity() {
     private var updateDialog: AlertDialog? = null
     private var lastPromptedVersion = 0
     private var lastOtaCheck = 0L
+
+    /** 上一个 OTA 状态，用来判断「Ready 是不是刚下完」——只有刚下完才自动弹安装框 */
+    private var lastOtaState: OtaState? = null
+
+    /**
+     * 下载完成但界面当时不在前台（用户在看抖音）时挂起，等回前台再弹。
+     *
+     * 不能在这里直接 `AlertDialog.show()`：Activity 不可见时弹窗会抛
+     * `WindowManager$BadTokenException`（实测在后台下载完成的场景必现）。
+     */
+    private var pendingInstallPrompt: OtaState.Ready? = null
+
+    /** 本次进程内自动弹过安装框的版本号，防止「稍后」之后每次回前台又弹 */
+    private var installPromptedVersion = 0
 
     /**
      * 本次进程内是否已经自动弹过激活框（用户 2026-10-31：冷启动只弹一次）。
@@ -188,6 +203,8 @@ class MainActivity : AppCompatActivity() {
         setupOta()
         setupLogUpload()
         setupEngineObserver()
+        // 从通知栏「安装」按钮进来的：此刻状态已 restoreReady 为 Ready，可以直接装
+        handleInstallIntent(intent)
     }
 
     override fun onResume() {
@@ -225,6 +242,9 @@ class MainActivity : AppCompatActivity() {
         renderLicense(license.state.value)
         permissionHandler.removeCallbacks(licenseRefresh)
         permissionHandler.postDelayed(licenseRefresh, LICENSE_BADGE_REFRESH_MS)
+        // 后台下载完成、用户此刻才切回前台 → 在这里补弹「更新已下载完成」。
+        // Ready 到达的那一刻界面若不可见，弹窗会抛 BadTokenException，所以只能挂起等这个时机。
+        maybeShowInstallPrompt()
     }
 
     /**
@@ -1108,8 +1128,16 @@ class MainActivity : AppCompatActivity() {
             is OtaState.Ready -> {
                 binding.tvUpdate.visibility = View.VISIBLE
                 binding.tvUpdate.text = "安装 ${state.manifest.versionName}"
-                binding.tvUpdate.setOnClickListener {
-                    OtaInstaller.install(this, state.file).onFailure { toast(it.message ?: "安装失败") }
+                binding.tvUpdate.setOnClickListener { beginInstall(state) }
+
+                // **只有「这次刚下完」才自动弹安装框**：状态从 Downloading/Verifying 转过来。
+                // 冷启动 `restoreReady()` 恢复的 Ready（lastOtaState == null）只亮顶栏不弹 —
+                // 否则用户每次打开 App 都会被一个「有包没装」的对话框拦住。
+                val justFinished = lastOtaState is OtaState.Downloading ||
+                    lastOtaState is OtaState.Verifying
+                if (justFinished && installPromptedVersion != state.manifest.versionCode) {
+                    pendingInstallPrompt = state
+                    maybeShowInstallPrompt()
                 }
             }
 
@@ -1125,6 +1153,106 @@ class MainActivity : AppCompatActivity() {
                 binding.tvUpdate.setOnClickListener { checkOta(manual = true) }
             }
         }
+        // 最后赋值：上面的 Ready 分支要读「上一个状态」判断是不是刚下完
+        lastOtaState = state
+    }
+
+    /**
+     * 把挂起的安装提示弹出来（若界面此刻真的在前台）。
+     *
+     * 由两处触发：Ready 到达时（界面可见则立即弹）、以及 `onResume`（后台下载完成 → 用户切回来）。
+     */
+    private fun maybeShowInstallPrompt() {
+        val state = pendingInstallPrompt ?: return
+        if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return
+        if (isFinishing || updateDialog?.isShowing == true) return
+        pendingInstallPrompt = null
+        installPromptedVersion = state.manifest.versionCode
+        showInstallPrompt(state)
+    }
+
+    /**
+     * 「更新已下载完成」的自动弹窗（vc50）。
+     *
+     * 为什么需要：下载完成后原来只把顶栏那个小字改成「安装 x.y.z」，
+     * 而此刻用户多半在抖音里 —— 包下好了却没人知道，实测有设备挂着旧版本三天没升。
+     * 现在下完就弹，且「立即安装」直接进系统安装器，不用再找入口。
+     *
+     * 三种前置状态分开处理，不要合成一句「安装失败」让用户猜：
+     * - 任务运行中：安装会杀进程、打断自动化 ⇒ 只给「知道了」，让人先停任务；
+     * - 未授权「安装未知应用」：给「去设置」，开启后回来再装（OtaInstaller 会负责跳转）；
+     * - 其余：正常给「立即安装」。
+     */
+    private fun showInstallPrompt(state: OtaState.Ready) {
+        if (isFinishing || updateDialog?.isShowing == true) return
+        val manifest = state.manifest
+        val appName = getString(R.string.app_name)
+        val busy = TaskEngine.progress.value.state.isActive
+        val canInstall = Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+            packageManager.canRequestPackageInstalls()
+
+        val message = buildString {
+            append("**${manifest.versionName}**（${manifest.versionCode}）已下载完成")
+            if (manifest.size > 0) append("，${formatBytes(manifest.size)}")
+            append("。\n\n")
+            when {
+                busy -> append("任务正在运行，现在升级会**中断自动化**。请先停止任务，再点顶部的「安装」。")
+                !canInstall -> append("首次升级要先允许「$appName」**安装应用**。点「去设置」开启后回来再装。")
+                else -> append("点「立即安装」打开系统安装器。装完 App 会重启，授权、权限、已关注名单都保留。")
+            }
+        }
+
+        val builder = AlertDialog.Builder(this)
+            .setTitle("更新已下载完成")
+            .setMessage(PromptText.of(message))
+            .setNegativeButton(if (busy) "知道了" else "稍后", null)
+        when {
+            busy -> Unit
+            !canInstall -> builder.setPositiveButton("去设置") { _, _ -> beginInstall(state) }
+            else -> builder.setPositiveButton("立即安装") { _, _ -> beginInstall(state) }
+        }
+        val dialog = builder.create()
+        dialog.setOnDismissListener { updateDialog = null }
+        updateDialog = dialog
+        dialog.show()
+        LogStore.i(TAG, "自动弹出安装提示：${manifest.versionName}(busy=$busy canInstall=$canInstall)")
+    }
+
+    /**
+     * 真正调起系统安装器。
+     *
+     * 统一入口：顶栏「安装」、安装弹窗、通知栏「安装」都走这里，
+     * 因为 [OtaInstaller] 里带着「任务运行中拒绝」和「未授权跳设置」两条判断，绕过去就会漏。
+     */
+    private fun beginInstall(state: OtaState.Ready) {
+        OtaInstaller.install(this, state.file).onFailure { toast(it.message ?: "安装失败") }
+    }
+
+    /**
+     * 通知栏「安装」按钮打开本界面时携带的版本号 → 直接进安装。
+     *
+     * 处理完立刻把 extra 摘掉：`singleTop` 下同一个 Intent 会被 `onNewIntent` 复用，
+     * 不摘的话回前台/重建时会重复触发一次安装器。
+     */
+    private fun handleInstallIntent(intent: Intent?) {
+        val want = intent?.getIntExtra(EXTRA_INSTALL_NOW, 0) ?: 0
+        if (want <= 0) return
+        intent?.removeExtra(EXTRA_INSTALL_NOW)
+        val state = OtaManager.state.value
+        if (state is OtaState.Ready && state.manifest.versionCode == want) {
+            installPromptedVersion = want
+            pendingInstallPrompt = null
+            beginInstall(state)
+        } else {
+            LogStore.w(TAG, "通知里的安装请求已失效：want=$want state=$state")
+            toast("安装包已失效，请重新检查更新")
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleInstallIntent(intent)
     }
 
     private fun showUpdatePrompt(manifest: OtaManifest) {
@@ -1570,6 +1698,14 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "主界面"
+
+        /**
+         * 通知栏「安装」按钮带过来的 versionCode。
+         *
+         * [OtaService] 发完成通知时写进 Intent，本界面读到就直接调起安装器 ——
+         * 这样「下载完 → 点通知 → 装」只要一次点击，不必先进界面再找那个小字入口。
+         */
+        const val EXTRA_INSTALL_NOW = "install_now_version"
 
         /** 授权密钥长度。与服务端 `security.js` 的 `KEY_LENGTH` 必须一致 */
         private const val KEY_LENGTH = 11

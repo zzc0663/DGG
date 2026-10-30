@@ -40,7 +40,7 @@ object OtaInstaller {
                     ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 )
             }
-            return Result.failure(IllegalStateException("请先允许「${context.getString(R.string.app_name)}」安装未知应用，再点一次安装"))
+            return Result.failure(IllegalStateException("请先允许「${context.getString(R.string.app_name)}」安装应用，开启后回来再点「立即安装」"))
         }
         return runCatching {
             val uri = FileProvider.getUriForFile(
