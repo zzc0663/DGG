@@ -393,7 +393,9 @@ class Actions(
         if (bounds.width() > 0 && bounds.height() > 0) {
             val point = humanizer.pointIn(bounds)
             if (dispatchTap(point)) {
-                LogStore.d(TAG, "点击 $label @ ($point) 落点并非正中")
+                // 把 bounds 一起打出来：同类问题（点了没反应）最需要的就是
+                // 「当时这颗按钮在哪儿、点到了哪儿」，缺了它只能靠猜。
+                LogStore.d(TAG, "点击 $label @ ($point) 目标=[${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}]")
                 return true
             }
         }
@@ -448,6 +450,12 @@ class Actions(
     }
 
     private suspend fun dispatchTap(point: Point): Boolean {
+        // 取证：点位如果压在悬浮窗上，日志里留一句。手势期间悬浮窗已经被
+        // TouchGuard 置成不可触摸（所以不会被吞），这里只为了让「点了没反应」这类
+        // 问题下一次能直接被排除，而不是靠猜。
+        if (TouchGuard.covers(point.x, point.y)) {
+            LogStore.d(TAG, "点击点 (${point.x},${point.y}) 压在悬浮窗上（已临时置为不可触摸，不会吞点击）")
+        }
         val path = Path().apply { moveTo(point.x.toFloat(), point.y.toFloat()) }
         val stroke = GestureDescription.StrokeDescription(path, 0, humanizer.tapDurationMs())
         return dispatch(GestureDescription.Builder().addStroke(stroke).build())

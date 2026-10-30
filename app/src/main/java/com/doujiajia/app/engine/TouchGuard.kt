@@ -29,15 +29,31 @@ object TouchGuard {
     @Volatile
     private var resumeHook: (() -> Unit)? = null
 
-    fun register(onSuspend: () -> Unit, onResume: () -> Unit) {
+    /** 判断某个屏幕坐标是否被悬浮窗盖住（诊断用，见 [covers]） */
+    @Volatile
+    private var hitTestHook: ((Int, Int) -> Boolean)? = null
+
+    fun register(onSuspend: () -> Unit, onResume: () -> Unit, hitTest: (Int, Int) -> Boolean) {
         suspendHook = onSuspend
         resumeHook = onResume
+        hitTestHook = hitTest
     }
 
     fun unregister() {
         suspendHook = null
         resumeHook = null
+        hitTestHook = null
     }
+
+    /**
+     * 这个坐标是不是压在悬浮窗上。
+     *
+     * 手势期间悬浮窗已经是「不可触摸」了，所以即使压上也不会被吞掉；
+     * 留这个判断纯粹是为了**日志能说话**：以后再出现「点了关注界面没变」，
+     * 一眼就能排除「是不是点到自己的面板上了」这条可能。
+     */
+    fun covers(x: Int, y: Int): Boolean = runCatching { hitTestHook?.invoke(x, y) ?: false }
+        .getOrDefault(false)
 
     /** 手势即将注入：悬浮窗暂时不接收触摸。没有悬浮窗时是空操作。 */
     fun suspendForGesture() {

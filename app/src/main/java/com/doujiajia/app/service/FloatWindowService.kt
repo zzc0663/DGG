@@ -107,8 +107,21 @@ class FloatWindowService : Service() {
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        // 引擎注入手势时会把本窗口临时设为不可触摸，见 TouchGuard 的注释
-        TouchGuard.register(onSuspend = { setTouchable(false) }, onResume = { setTouchable(true) })
+        // 引擎注入手势时会把本窗口临时设为不可触摸；hitTest 只用于日志取证，见 TouchGuard.covers
+        TouchGuard.register(
+            onSuspend = { setTouchable(false) },
+            onResume = { setTouchable(true) },
+            hitTest = { x, y -> coversPoint(x, y) }
+        )
+    }
+
+    /** 屏幕坐标是否落在这个悬浮窗的当前矩形里 */
+    private fun coversPoint(x: Int, y: Int): Boolean {
+        val root = binding?.root ?: return false
+        val loc = IntArray(2)
+        root.getLocationOnScreen(loc)
+        return x >= loc[0] && x <= loc[0] + root.width &&
+            y >= loc[1] && y <= loc[1] + root.height
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

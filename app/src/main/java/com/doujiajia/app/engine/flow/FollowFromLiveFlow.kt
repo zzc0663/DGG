@@ -254,18 +254,16 @@ class FollowFromLiveFlow : Flow {
                 }
 
                 CardState.FOLLOWABLE -> {
-                    val button = card.node
-                    if (button == null || !ctx.actions.tapNode(button, "关注按钮")) {
-                        LogStore.w(TAG, "点击「关注」失败：$nickname")
+                    if (card.node == null) {
+                        LogStore.w(TAG, "没取到关注按钮节点：$nickname")
                         closeCard(ctx, targets)
                         continue
                     }
-
                     // 关键：必须等到界面真的变成「已关注」才算成功，不接受「点了就当成功」。
                     // 但私密账号是**例外中的例外**——它永远不会变成已关注，只会变成申请态，
                     // 所以要在同一趟判据里先认出来，认出即返回，不等满 6 秒。
                     // 传 button：优先「刷新这颗按钮读文案」（毫秒级），而不是每轮重走一遍全树。
-                    val outcome = awaitFollowOutcome(ctx, targets, VERIFY_TIMEOUT_MS, button)
+                    val outcome = tapFollowAndWait(ctx, targets, nickname, card.node)
                     when (outcome.state) {
                         CardState.PRIVATE -> {
                             // 关注动作已经发出去了（申请），但粉丝数不会增加、额度也白占。
@@ -1130,6 +1128,115 @@ class FollowFromLiveFlow : Flow {
     }
 
     /**
+     * 点「关注」并等结论，**按钮没停稳不点、点了没生效再点一次**。
+     *
+     * ### 为什么需要「等停稳」
+     *
+     * 资料卡是**滑入动画**：卡片还在移动时读到的 bounds，等触摸真正落到屏幕上时按钮已经挪走了，
+     * 于是这一下点在空白处——界面什么都不变。代码里早就为「快捷操作栏 → 资料卡」那条路
+     * 加了 `CARD_ENTRY_SETTLE_MS`（900ms），注释也记着同样的现象；但**点评论直接弹资料卡**
+     * 那条路没有等，`awaitCard` 一找到「关注」就返回，此时卡片可能才滑到一半。
+     *
+     * 真机日志（`R-20261030-A8EE6C`，vc41）里 5 次点关注有 3 次失败，全部表现为
+     * 「点了、`dispatchGesture` 返回成功、界面 6 秒没变、弹层文案仍是『关注』」。
+     * 其中最快的那次从点昵称到点关注只隔 **0.88 秒** —— 卡片根本还没停。
+     *
+     * ### 为什么需要重试
+     *
+     * 「等停稳」只能消除动画这一种原因。如果抖音这一次就是没吃下这个点击（浮层拦截、
+     * 手势被系统丢弃），界面会停在「关注」，白等 6 秒然后判失败。
+     * 这时卡片已经彻底停稳，**重新取一次按钮再点一次**的成功率远高于继续等。
+     *
+     * 安全性：第二次点击前必须重新走 [awaitCard]，它会把「取消关注 / 互相关注」认成
+     * ALREADY_FOLLOWED 并直接返回 —— 所以绝不会因为重试而把已经关注的人取关。
+     */
+    private suspend fun tapFollowAndWait(
+        ctx: FlowContext,
+        targets: LiveTargets,
+        nickname: String,
+        first: AccessibilityNodeInfo
+    ): CardProbe {
+        var button: AccessibilityNodeInfo? = first
+        var last = CardProbe(CardState.UNKNOWN)
+
+        for (attempt in 1..FOLLOW_TAP_MAX_ATTEMPTS) {
+            val btn = button ?: return last
+            awaitButtonStill(ctx, btn, "关注按钮")
+            logFollowButton(btn, attempt, nickname)
+            if (!ctx.actions.tapNode(btn, "关注按钮")) {
+                LogStore.w(TAG, "点击「关注」失败（第 $attempt 次）：$nickname")
+                return last
+            }
+            last = awaitFollowOutcome(ctx, targets, VERIFY_TIMEOUT_MS, btn)
+            if (last.state != CardState.UNKNOWN) return last
+            if (attempt == FOLLOW_TAP_MAX_ATTEMPTS) break
+
+            // 到这儿说明：点了、界面没变、卡片还开着（下面重新等卡会确认）。
+            // 不打「点层文案」dump——真正要 dump 的是最后一次失败，留给调用方统一做。
+            LogStore.w(
+                TAG,
+                "第 $attempt 次点「关注」后 ${VERIFY_TIMEOUT_MS}ms 界面没变（$nickname），" +
+                    "重新取按钮再点一次"
+            )
+            val again = awaitCard(ctx, targets, CARD_TIMEOUT_MS)
+            if (again.state != CardState.FOLLOWABLE) return again
+            button = again.node
+        }
+        return last
+    }
+
+    /**
+     * 把「这一下点的是哪个关注按钮」写进日志。
+     *
+     * 为什么值得单独记：抖音的**快捷操作栏**里也有一个「关注」文本节点，
+     * 它和资料卡里的关注按钮在文案上完全一样，只有 `id` / 位置不同。
+     * 2026-10-30 真机里那些「点了没反应」的案例，弹层出现的位置差别很大
+     * （点 `(554,1830)` 那次明显比其它次的 `(560~600,1626~1653)` 靠下），
+     * 但旧日志只有落点、没有 id，分不清是「资料卡的按钮点了没反应」
+     * 还是「点成了操作栏里的同名项」。
+     *
+     * 三次跨进程调用，只在点关注时付，可以接受。
+     */
+    private fun logFollowButton(node: AccessibilityNodeInfo, attempt: Int, nickname: String) {
+        val bounds = runCatching { Rect().also { node.getBoundsInScreen(it) } }.getOrNull()
+        val text = runCatching { node.text?.toString()?.trim() }.getOrNull()
+        val desc = runCatching { node.contentDescription?.toString()?.trim() }.getOrNull()
+        val id = runCatching { node.viewIdResourceName }.getOrNull()
+        LogStore.d(
+            TAG,
+            "关注按钮候选（第 $attempt 次，$nickname）：text=${text ?: "-"} desc=${desc ?: "-"} " +
+                "id=${id?.substringAfterLast('/') ?: "-"} " +
+                "bounds=[${bounds?.left},${bounds?.top}][${bounds?.right},${bounds?.bottom}]" +
+                (bounds?.let { " 高=${it.height()} 宽=${it.width()}" } ?: "")
+        )
+    }
+
+    /**
+     * 等按钮的屏幕坐标连续两次一致（= 滑入/回弹动画停了）。
+     *
+     * 每次先 `refresh()`：节点可能已经被抖音换成「取消关注」，此时读到的坐标是新控件的，
+     * 也不需要特殊处理——真关注上了，后面 [awaitFollowOutcome] 会立刻定论。
+     */
+    private suspend fun awaitButtonStill(
+        ctx: FlowContext,
+        node: AccessibilityNodeInfo,
+        label: String
+    ) {
+        var last = ctx.actions.boundsOf(node)
+        repeat(BUTTON_STILL_POLLS) {
+            delay(BUTTON_STILL_POLL_MS)
+            if (!runCatching { node.refresh() }.getOrDefault(false)) return
+            val now = ctx.actions.boundsOf(node)
+            if (now == last) return
+            LogStore.d(
+                TAG,
+                "$label 位置还在动（y ${last.centerY()} → ${now.centerY()}），等它停稳再点"
+            )
+            last = now
+        }
+    }
+
+    /**
      * 点完「关注」之后等结论：**变成已关注** / **其实是私密账号（只发了申请）** / 超时。
      *
      * 三者分开的意义：
@@ -1642,6 +1749,19 @@ class FollowFromLiveFlow : Flow {
 
         /** 点「资料卡」后等卡片滑入动画结束，避免拿动画中的 bounds 去点关注 */
         const val CARD_ENTRY_SETTLE_MS = 900L
+
+        /**
+         * 点「关注」最多点几次。
+         *
+         * 真机 5 次点关注有 3 次「点了界面没变」（`R-20261030-A8EE6C`），
+         * 其中至少一部分是资料卡滑入动画还没停就点了。第二次点击前会重新等卡、
+         * 重新取按钮，成本约 8 秒；相比「白丢一个人」还是划算。
+         */
+        const val FOLLOW_TAP_MAX_ATTEMPTS = 2
+
+        /** 等按钮停稳：每次间隔 180ms，最多 4 次（≈720ms，动画通常 300ms 内结束） */
+        const val BUTTON_STILL_POLL_MS = 180L
+        const val BUTTON_STILL_POLLS = 4
 
         /**
          * 诊断日志里「弹层文案」的长度上限。

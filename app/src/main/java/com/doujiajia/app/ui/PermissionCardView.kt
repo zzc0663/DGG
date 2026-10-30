@@ -41,42 +41,37 @@ class PermissionCardView @JvmOverloads constructor(
         val padV = (14 * resources.displayMetrics.density).toInt()
         setPadding(pad, padV, pad, padV)
 
-        binding.btnAccessibility.setOnClickListener { onPermissionClick?.invoke(Kind.ACCESSIBILITY) }
-        binding.btnOverlay.setOnClickListener { onPermissionClick?.invoke(Kind.OVERLAY) }
-        binding.btnNotification.setOnClickListener { onPermissionClick?.invoke(Kind.NOTIFICATION) }
+        binding.permAccessibility.setOnClickListener { onPermissionClick?.invoke(Kind.ACCESSIBILITY) }
+        binding.permOverlay.setOnClickListener { onPermissionClick?.invoke(Kind.OVERLAY) }
+        binding.permNotification.setOnClickListener { onPermissionClick?.invoke(Kind.NOTIFICATION) }
         binding.tvKeepAlive.setOnClickListener { onKeepAliveClick?.invoke() }
     }
 
-    /** 用系统实时状态渲染，不做本地缓存 */
+    /**
+     * 用系统实时状态渲染，不做本地缓存。
+     *
+     * 只改颜色不改文案：三个点后面永远是无障碍 / 悬浮窗 / 通知，
+     * 状态完全由颜色表达（绿=已授权、红=没授权），文字只在缺权限时变红当提醒。
+     * 早先是「已授权 / 去授权」两段文字 + 一个按钮，一行 48dp、三行一百多 dp，
+     * 把「开始服务」挤到屏幕很下面，而这三个权限真正要给的信息只有一个布尔值。
+     */
     fun render(state: AppPermissions.State) {
-        renderRow(
-            state.accessibility,
-            binding.tvAccessibilityStatus,
-            binding.btnAccessibility,
-            binding.dotAccessibility
-        )
-        renderRow(
-            state.overlay,
-            binding.tvOverlayStatus,
-            binding.btnOverlay,
-            binding.dotOverlay
-        )
-        renderRow(
-            state.notification,
-            binding.tvNotificationStatus,
-            binding.btnNotification,
-            binding.dotNotification
-        )
+        renderItem(state.accessibility, binding.tvAccessibilityStatus, binding.dotAccessibility)
+        renderItem(state.overlay, binding.tvOverlayStatus, binding.dotOverlay)
+        renderItem(state.notification, binding.tvNotificationStatus, binding.dotNotification)
     }
 
-    private fun renderRow(granted: Boolean, status: TextView, button: TextView, dot: android.view.View) {
-        status.text = if (granted) "已授权" else "未授权"
-        status.setTextColor(
-            ContextCompat.getColor(context, if (granted) R.color.dot_green else R.color.brand_red)
-        )
-        button.text = if (granted) "已授权" else "去授权"
+    private fun renderItem(granted: Boolean, label: TextView, dot: android.view.View) {
         dot.setBackgroundResource(
             if (granted) R.drawable.bg_dot_green else R.drawable.bg_dot_red
         )
+        label.setTextColor(
+            ContextCompat.getColor(
+                context,
+                if (granted) R.color.text_secondary else R.color.brand_red
+            )
+        )
+        // 无障碍读屏时念得出状态：颜色对色弱用户不友好，也读不出来
+        dot.contentDescription = if (granted) "已授权" else "未授权"
     }
 }
