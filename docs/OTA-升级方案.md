@@ -523,3 +523,80 @@ POST /api/v1/admin/releases/:id/publish
 
 那台设备当前装的是 vc18，**它自己的 OTA 链路就是坏的**，所以修复包只能**手动装一次**
 （`adb install -r` 或拷 APK 到手机点开）。装上 vc33 之后，后续升级才走 OTA。
+
+## 14. 「安装包没有签名」：APK 没签 v1，旧系统读不出来（2026-10-30，vc40 / 1.4.10）
+
+### 现象（日志 `R-20261030-50E355`，vc33 / Android 7~8 副机）
+
+```
+21:33:04 检查更新：当前 33（stable/arm64-v8a）
+21:33:04 发现新版本 1.4.9(38)，当前 33
+21:33:16 下载完成并校验通过：dgg-38.apk（4825440 字节）   ← sha256 对了
+21:33:16 校验拒绝：安装包没有签名                        ← 第 3 道卡住
+```
+
+同一个包在 API 37 的主测机上装得好好的，所以不是包坏了，是**读签名的能力**有差异。
+
+### 根因
+
+| 系统 | 用来读 **APK 文件**签名的 flag | 读的是哪种签名 |
+|---|---|---|
+| API ≥ 28 | `GET_SIGNING_CERTIFICATES` | v2 / v3（APK Signature Scheme） |
+| API < 28 | `GET_SIGNATURES` | **只有 v1（JAR signing）** |
+
+而 `apksigner verify -v` 查出来：
+
+```
+Verified using v1 scheme (JAR signing): false
+Verified using v2 scheme (APK Signature Scheme v2): true
+```
+
+**包只有 v2。** AGP 在 `minSdk >= 24` 时默认不签 v1（v2 从 API 24 起就支持，装是装得上的），
+于是 API < 28 的设备用 `GET_SIGNATURES` 读这个包，`PackageInfo.signatures` 恒为 `null`
+⇒ `signersOf(archive)` 为空 ⇒ 报「安装包没有签名」。
+
+**装得上，但校验读不到** —— 这两件事被混为一谈才会卡这么久。
+
+### 修法：构建时补签 v1
+
+`app/build.gradle.kts` 的 release signingConfig 加：
+
+```kotlin
+enableV1Signing = true   // minSdk>=24 时 AGP 默认关，但旧系统 OTA 校验必须靠它
+enableV2Signing = true
+```
+
+副作用核查（都过）：
+
+| 项 | 结果 |
+|---|---|
+| 证书是否变 | **不变**。`keytool -printcert -jarfile` 出来的 SHA256 仍是 `59927d81…`，与 v2 一致 |
+| 服务端 `APP_SIGNING_CERT_SHA256` | 不用改，上传时 `probeApk` 取到的还是同一张证书 |
+| 已装设备能否覆盖升级 | 能。签名方案变了，证书没变 |
+| 包体积 | 4 825 440 → 4 903 950 字节（+78 KB，v1 的 MANIFEST.MF/CERT.SF 开销） |
+| 安全 | 不退化。v2 存在时系统优先用 v2；v1 只在旧系统解析/兜底时被读 |
+
+⚠️ `apksigner verify -v` 对加了 v1 的包**仍会打印 `v1 scheme: false`**（它的判定口径是「这套签名是否被用作验证方案」）。
+不要被它误导——**用 `META-INF/CERT.SF` 是否存在 + `jarsigner -verify` + `keytool -printcert -jarfile` 三样交叉确认**：
+
+```
+META-INF/CERT.SF / CERT.RSA / MANIFEST.MF 都在
+jarsigner -verify → 「jar 已验证, 但出现签名者错误」（-strict 下 POSIX 属性的提示，签名本身有效）
+keytool -printcert -jarfile → SHA256 59:92:7D:81…（与 v2 一致）
+```
+
+### 客户端诊断同步加强
+
+`OtaVerifier` 读不到签名时不再只说「安装包没有签名」，而是分两种并打日志：
+
+```
+安装包没有 v1 签名（本机 API 26 只能读 v1 签名，请使用已签 v1 的包）
+安装包没有签名（本机 API 34 读不到签名信息）
+```
+
+日志里同时记录 `API 级别 / 使用哪个 flag / 包大小`——下次遇到同类问题不用再猜。
+
+### 验收
+
+副机（vc33）点「检查更新」→ 应看到 `1.4.10(40)` → 下载 → **校验通过** → 安装。
+主测机（vc40 起）同理。若仍报「没有签名」，日志里这条新文案会直接指出是 API 级别问题而不是包问题。

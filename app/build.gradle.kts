@@ -65,6 +65,24 @@ android {
                 storePassword = keystoreProps.getProperty("storePassword")
                 keyAlias = keystoreProps.getProperty("keyAlias")
                 keyPassword = keystoreProps.getProperty("keyPassword")
+
+                // 🔴 必须签 v1（JAR signing），哪怕 minSdk=24 用 v2 也能装。
+                //
+                // 原因不是安装，是 **OTA 校验**：`OtaVerifier` 在 API < 28 的设备上只能用
+                // `getPackageArchiveInfo(path, GET_SIGNATURES)` 读 **APK 文件**的签名，而
+                // GET_SIGNATURES 读的正是 v1（JAR）签名。minSdk 24 时 AGP 默认关 v1，
+                // 包就只有 v2 —— 于是旧系统上 `archive.signatures` 为 null，
+                // 校验报「安装包没有签名」，OTA 在这类设备上永远升不了级。
+                //
+                // 2026-10-30 线上事故（日志 R-20261030-50E355，vc33 / Android 7~8）：
+                // `校验拒绝：安装包没有签名`，而 `apksigner verify -v` 显示
+                // v1=false / v2=true —— 两头一对就清楚了。
+                //
+                // v1 不改变签名证书，只多一份 JAR 签名：证书指纹仍是 59927d81…，
+                // 服务端 APP_SIGNING_CERT_SHA256 不用动，已装设备照样能覆盖升级。
+                // 安全上也没有退化：v2 存在时系统优先用 v2，v1 只在旧系统解析/兜底时被读。
+                enableV1Signing = true
+                enableV2Signing = true
             }
         }
     }

@@ -62,7 +62,27 @@ object OtaVerifier {
             return VerifyResult.Rejected("读不到当前应用的签名，无法校验")
         }
         if (theirs.isEmpty()) {
-            return VerifyResult.Rejected("安装包没有签名")
+            // 这条不是「APK 真的没签名」，而是「本机读不出来」——两者必须区分开，
+            // 否则会像 2026-10-30 那次（日志 R-20261030-50E355）一样查很久：
+            //
+            // API < 28 的设备只能走 `getPackageArchiveInfo(path, GET_SIGNATURES)`，
+            // 而 GET_SIGNATURES 读的是 **v1（JAR）签名**。AGP 在 minSdk >= 24 时默认不签 v1，
+            // 包只有 v2 ⇒ 旧系统上 signatures 恒为 null ⇒ 报「没有签名」，OTA 永远装不上。
+            // 修法是构建时 `enableV1Signing = true`（见 app/build.gradle.kts 的注释）。
+            val api = Build.VERSION.SDK_INT
+            LogStore.e(
+                TAG,
+                "读不到下载包的签名（API $api，当前系统用" +
+                    (if (api >= Build.VERSION_CODES.P) " GET_SIGNING_CERTIFICATES" else " GET_SIGNATURES（只认 v1）") +
+                    "）；包大小 ${apk.length()} 字节"
+            )
+            return VerifyResult.Rejected(
+                if (api >= Build.VERSION_CODES.P) {
+                    "安装包没有签名（本机 API $api 读不到签名信息）"
+                } else {
+                    "安装包没有 v1 签名（本机 API $api 只能读 v1 签名，请使用已签 v1 的包）"
+                }
+            )
         }
         if (!sameSigners(mine, theirs)) {
             LogStore.e(
