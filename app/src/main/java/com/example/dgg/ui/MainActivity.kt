@@ -1135,41 +1135,49 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 启动前的确认弹窗：**只放能影响决策的信息**（前提 / 参数 / 边界），粗体由 [PromptText] 解析。
+     *
+     * 为什么不再写 5 段长文（2026-10-30 用户要求「提示关键信息就好」）：
+     * 旧文案 150~200 字，最要命的一条「先手动进直播间」被埋在第三段，
+     * 而「读评论 → 挑人 → 点资料卡」这类过程描述对用户决策毫无价值——
+     * 他要点「开始」时只想确认两件事：**现在能不能跑**、**这次跑的是什么参数**。
+     */
+    private fun showKeyConfirm(title: String, body: String, onStart: () -> Unit) {
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(PromptText.of(body))
+            .setPositiveButton("开始") { _, _ -> onStart() }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
     /** 「开始服务」= M2 主业务：直播间评论随机关注 */
     private fun confirmFollow() {
         val s = store.current
-        AlertDialog.Builder(this)
-            .setTitle("开始关注")
-            .setMessage(
-                "开始前请确认：你已经在抖音里手动进入目标直播间，并停在直播间画面。\n\n" +
-                    "脚本会循环执行：读直播间评论 → 随机挑一个人 → 点开资料卡 → 关注 → 回直播间，" +
-                    "每次关注之间间隔约 ${s.scanIntervalLabel}（叠加 ±${s.jitterPercent}% 抖动）。\n\n" +
-                    "达到「目标关注数量 ${s.followTarget}」或「今日上限 ${s.dailyLimit}」时停止。\n\n" +
-                    "不会私信、不会点赞、不会刷评论，也不会自己去找直播间。\n\n" +
-                    "运行期间屏幕会被自动操作，请勿手动干扰；随时可用悬浮窗或通知栏停止。"
-            )
-            .setPositiveButton("开始") { _, _ -> startFlow(FollowFromLiveFlow(), "已启动直播关注") }
-            .setNegativeButton("取消", null)
-            .show()
+        showKeyConfirm(
+            "开始关注",
+            "· **请先手动进入目标直播间，停在直播画面上**\n" +
+                "· 目标 **${s.followTarget}** 人 · 今日上限 **${s.dailyLimit}** · " +
+                "每次间隔约 **${s.scanIntervalLabel}**（±${s.jitterPercent}% 抖动）\n" +
+                "· 只做关注：不私信、不点赞、不刷评论，也不会自己找直播间\n" +
+                "· 随时可用悬浮窗或通知栏停止"
+        ) { startFlow(FollowFromLiveFlow(), "已启动直播关注") }
     }
 
     /** 「开始服务」= M3 主业务：直播间互动（发评论 / 点赞 / 连麦） */
     private fun confirmLiveInteract() {
         val s = store.current
         val mode = if (s.commentMode == 1) "预设评论" else "复制最新评论"
-        AlertDialog.Builder(this)
-            .setTitle("开始直播互动")
-            .setMessage(
-                "开始前请确认：你已经在抖音里手动进入目标直播间，并停在直播间画面。\n\n" +
-                    "脚本会循环执行：每 ${s.commentGapMin}~${s.commentGapMax} 秒发一条评论（$mode），" +
-                    "每发 ${s.likeTrigger} 条自动点赞 ${s.likeCountMin}~${s.likeCountMax} 次" +
-                    (if (s.micRequest) "，并申请一次连麦" else "") + "。\n\n" +
-                    "没有总量目标，会一直跑到你手动停止。一旦出现「评论过快」一类的平台提示，立刻停机且不重试。\n\n" +
-                    "运行期间屏幕会被自动操作，请勿手动干扰；随时可用悬浮窗或通知栏停止。"
-            )
-            .setPositiveButton("开始") { _, _ -> startFlow(LiveInteractFlow(), "已启动直播互动") }
-            .setNegativeButton("取消", null)
-            .show()
+        val likeLine = "· 每 **${s.likeTrigger}** 条赞 **${s.likeCountMin}~${s.likeCountMax}** 次" +
+            (if (s.micRequest) " · 申请连麦" else "")
+        showKeyConfirm(
+            "开始直播互动",
+            "· **请先手动进入目标直播间，停在直播画面上**\n" +
+                "· 每 **${s.commentGapMin}~${s.commentGapMax}** 秒发 1 条（$mode）\n" +
+                likeLine + "\n" +
+                "· 无总量目标，手动停止；遇「评论过快」类提示立刻停机"
+        ) { startFlow(LiveInteractFlow(), "已启动直播互动") }
     }
 
     /** 「开始服务」= M4 主业务：主动刷推荐流 + 随机停留 + 文案标签加权点赞 */
@@ -1189,28 +1197,19 @@ class MainActivity : AppCompatActivity() {
         }
         val minutes = s.runMinutes.coerceIn(Settings.RUN_MINUTES_MIN, Settings.RUN_MINUTES_MAX)
 
-        val interactPart = if (browseOnly) {
-            "这是「首页连播」：只刷视频，不做任何互动。\n\n"
+        val interactLine = if (browseOnly) {
+            "· 只刷视频，不做任何互动（不点赞、不收藏）"
         } else {
-            "点赞基线 ${s.probLike}%（命中标签时按「基线×(1+加成)」放大，最高 60%），" +
-                "收藏基线 ${s.probCollect}%；当前 ${tagCount} 条文案标签生效。\n\n"
+            "· 点赞 **${s.probLike}%** · 收藏 **${s.probCollect}%** · **$tagCount** 条文案标签生效"
         }
 
-        AlertDialog.Builder(this)
-            .setTitle("开始养号")
-            .setMessage(
-                "开始前请确认：抖音已打开，并停在「能看到右侧点赞按钮的视频画面」。" +
-                    "不在的话脚本会试着点「首页」→「推荐」自己进去，进不去会明确中止，不会瞎猜。\n\n" +
-                    "运行中会：自动上下滑推荐流，每条视频按「$pace」节奏随机停留 1.5~90 秒" +
-                    "（多数 2~12 秒），每 20~40 屏休息一次，偶尔回看、偶尔看一眼评论。\n\n" +
-                    interactPart +
-                    "遇到直播推荐卡、商品卡一律直接滑走，绝不点击。\n\n" +
-                    "⚠ 这个功能不涨粉：它不关注任何人，只把账号养得像个正常活跃用户。" +
-                    "到「运行时长 $minutes 分钟」自动停，随时可用悬浮窗停止。"
-            )
-            .setPositiveButton("开始") { _, _ -> startFlow(NurtureFlow(), "已启动刷视频养号") }
-            .setNegativeButton("取消", null)
-            .show()
+        showKeyConfirm(
+            "开始养号",
+            "· **抖音已打开，停在有右侧点赞按钮的视频画面**\n" +
+                "· 每条停留 **1.5~90 秒**（${pace}节奏，多数 2~12 秒），每 20~40 屏休息一次\n" +
+                interactLine + "\n" +
+                "· 运行 **$minutes** 分钟后自动停；**不关注任何人（不涨粉）**"
+        ) { startFlow(NurtureFlow(), "已启动刷视频养号") }
     }
 
     /** 尚未实现的功能页签：宁可明确说「没有」，也不要跑一个参数完全无关的流程 */
