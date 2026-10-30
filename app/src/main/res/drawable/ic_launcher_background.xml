@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  抖关关 adaptive icon 背景层：品牌红对角渐变 + 右上角柔和高光。
+  抖加加 adaptive icon 背景层：品牌红对角渐变 + 右上角柔和高光。
   与 tools/gen_launcher_icon.py 生成的位图 fallback 使用同一组颜色与几何，
   保证 API 26+ 和 API 24-25 两套图标看起来是同一个东西。
 -->

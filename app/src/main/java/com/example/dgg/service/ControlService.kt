@@ -120,7 +120,7 @@ class ControlService : Service() {
      * 是任务启动那一刻的快照，用户在悬浮面板把目标改成 220，通知栏会一直挂着旧的 `0/260`。
      * 终态时这行最难看出真假——任务已经停了，数字却还停在旧分母上，容易让人以为还在跑。
      *
-     * 不再重复状态：标题已经是「抖关关 · 运行中」，正文里再来一句「运行中 · 」纯属占位。
+     * 不再重复状态：标题已经是「抖加加 · 运行中」，正文里再来一句「运行中 · 」纯属占位。
      */
     private fun liveBrief(progress: EngineProgress): String =
         progress.withLiveTarget(SettingsStore.get(this).current.followTarget).brief(includeState = false)
@@ -146,7 +146,7 @@ class ControlService : Service() {
         val text = liveBrief(progress)
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_logo)
-            .setContentTitle("抖关关 · ${progress.state.label}")
+            .setContentTitle("${getString(R.string.app_name)} · ${progress.state.label}")
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setContentIntent(openApp)

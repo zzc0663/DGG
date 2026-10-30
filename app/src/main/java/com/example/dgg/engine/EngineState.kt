@@ -67,7 +67,7 @@ data class EngineProgress(
     /**
      * 通知栏 / 悬浮窗 / 状态条的一行摘要。
      *
-     * @param includeState 是否带上状态标签。通知栏的标题已经是「抖关关 · 运行中」，
+     * @param includeState 是否带上状态标签。通知栏的标题已经是「抖加加 · 运行中」，
      *                     正文再写一遍「运行中 · 已关注 4/300」就是重复，那里传 false。
      */
     fun brief(includeState: Boolean = true): String {

@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
+import com.example.dgg.R
 import com.example.dgg.data.LogStore
 import com.example.dgg.engine.TaskEngine
 import java.io.File
@@ -39,7 +40,7 @@ object OtaInstaller {
                     ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 )
             }
-            return Result.failure(IllegalStateException("请先允许「抖关关」安装未知应用，再点一次安装"))
+            return Result.failure(IllegalStateException("请先允许「${context.getString(R.string.app_name)}」安装未知应用，再点一次安装"))
         }
         return runCatching {
             val uri = FileProvider.getUriForFile(
@@ -60,7 +61,7 @@ object OtaInstaller {
                 throw IllegalStateException("系统没有可用的安装器，请手动到文件管理器安装", error)
             }
             throw IllegalStateException(
-                "系统拦截了安装：请允许「抖关关」安装应用，或暂时关闭安全拦截",
+                "系统拦截了安装：请允许「${context.getString(R.string.app_name)}」安装应用，或暂时关闭安全拦截",
                 error
             )
         }

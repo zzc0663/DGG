@@ -10,7 +10,7 @@ import android.view.accessibility.AccessibilityWindowInfo
  *
  * 为什么不直接用 `service.rootInActiveWindow`：实测在抖音全屏播放时它会返回
  * **后台应用残留的 Dialog 窗口**（截图里明明只有抖音推荐流），于是
- * 页面判定读到的是抖关关自己的界面，转储出来的也全是无关节点，
+ * 页面判定读到的是抖加加自己的界面，转储出来的也全是无关节点，
  * 还会让人误以为「抖音页面里根本没这些控件」。
  *
  * 改为在 `service.windows` 里挑**面积最大的应用窗口**：前台全屏应用必然胜出，
@@ -19,7 +19,7 @@ import android.view.accessibility.AccessibilityWindowInfo
  *
  * **必须排除本应用自己的窗口**（2026-10-27 踩坑）：悬浮面板展开输入行时要临时
  * 把窗口切成可聚焦，那一刻 active window 就是我们自己的 TYPE_APPLICATION overlay，
- * 不排除的话 `foregroundPackage()` 会读成抖关关 → [com.example.dgg.engine.flow.LiveGuard]
+ * 不排除的话 `foregroundPackage()` 会读成抖加加 → [com.example.dgg.engine.flow.LiveGuard]
  * 误判「抖音不在前台」→ 反复 launch 把抖音重启 → 任务中止。
  */
 object ActiveWindow {

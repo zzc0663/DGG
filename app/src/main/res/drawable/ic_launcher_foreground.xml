@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  抖关关 adaptive icon 前景层：白色粗对勾（圆头圆角）。
+  抖加加 adaptive icon 前景层：白色粗对勾（圆头圆角）。
   几何与 tools/gen_launcher_icon.py 完全一致，落在 66dp 安全区（21~87）内，
   桌面裁成圆形/方形都不会切到笔画。
 

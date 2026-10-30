@@ -174,7 +174,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // 抖关关在前台：任务到终态时悬浮面板不再自动展开（见 FloatWindowService.observe），
+        // 抖加加在前台：任务到终态时悬浮面板不再自动展开（见 FloatWindowService.observe），
         // 同时把「在抖音里展开着看结论」的那块面板收起来，别挡参数区。
         AppVisibility.onResume()
         FloatWindowService.collapseIfExpanded()
@@ -375,7 +375,7 @@ class MainActivity : AppCompatActivity() {
         when (kind) {
             PermissionCardView.Kind.ACCESSIBILITY -> {
                 LogStore.i(TAG, "跳转无障碍设置页")
-                toast("请在列表中找到「抖关关 自动化」并开启")
+                toast("请在列表中找到「${getString(R.string.accessibility_service_label)}」并开启")
                 AppPermissions.openAccessibilitySettings(this)
             }
 
@@ -1220,7 +1220,7 @@ class MainActivity : AppCompatActivity() {
                     append(reason)
                     append("\n\n")
                     if (!DggAccessibilityService.isConnected()) {
-                        append("请先点「无障碍」一栏的「去授权」，在系统设置中找到「抖关关 自动化」并开启。")
+                        append("请先点「无障碍」一栏的「去授权」，在系统设置中找到「${getString(R.string.accessibility_service_label)}」并开启。")
                     } else {
                         append("详细原因见运行日志。")
                     }

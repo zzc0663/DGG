@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">抖关关</string>
+    <string name="app_name">抖加加</string>
 
     <!-- 无障碍服务 -->
-    <string name="accessibility_service_label">抖关关 自动化</string>
+    <string name="accessibility_service_label">抖加加 自动化</string>
     <string name="accessibility_service_summary">在抖音内执行自动关注与互动</string>
     <string name="accessibility_service_description">用于在抖音客户端内执行自动关注、养号与直播互动操作。服务仅在你手动点击「开始服务」后工作，可随时通过悬浮窗或通知栏停止；不会读取与任务无关的界面内容。</string>
 
