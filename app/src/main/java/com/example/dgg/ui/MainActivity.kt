@@ -26,6 +26,7 @@ import com.example.dgg.data.PermissionGuard
 import com.example.dgg.data.PresetTags
 import com.example.dgg.data.Settings
 import com.example.dgg.data.SettingsStore
+import com.example.dgg.data.license.LicenseGate
 import com.example.dgg.data.license.LicenseProvider
 import com.example.dgg.data.license.LicenseStatus
 import com.example.dgg.data.log.LogUploader
@@ -154,6 +155,9 @@ class MainActivity : AppCompatActivity() {
 
         store = SettingsStore.get(this)
         license = RemoteLicenseProvider(this)
+        // 把授权状态交给服务层门禁：EngineController.start() 直接查它，
+        // 悬浮窗「重试」/通知栏入口就无法绕过界面把无效授权的任务重新拉起来
+        LicenseGate.attach(license)
         LogStore.i(TAG, "主界面创建，参数已加载（目标=${store.current.followTarget}，日上限=${store.current.dailyLimit}）")
 
         // 日志上报要求日志必须落盘（release 也要），DebugChannel 只在 debug 包 attach 过
@@ -193,6 +197,9 @@ class MainActivity : AppCompatActivity() {
         }
         // 权限被升级/重装/系统清理重置时，主动喊一声——这几个权限没了应用是静默残废的
         warnIfPermissionsLost(state)
+        // 授权复核：只在 onCreate 握手一次的话，App 常驻前台几小时也不会发现授权被停用。
+        // 6 小时阈值 + 内部 30 分钟失败节流，正常使用几乎不会产生额外请求。
+        uiScope.launch { license.refreshIfStale(AUTHORIZATION_REFRESH_MS) }
     }
 
     /**
@@ -775,9 +782,12 @@ class MainActivity : AppCompatActivity() {
     private fun showActivationDialog() {
         if (isFinishing || activationDialog?.isShowing == true) return
         val input = EditText(this).apply {
-            hint = "DGG-XXXXX-XXXXX-XXXXX-XXXXX"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
-            filters = arrayOf(InputFilter.LengthFilter(64))
+            // 服务端 KEY_LENGTH=11、纯数字（crypto.randomInt(10)，**首位可能是 0**）。
+            // 所以这里既不能要求首位非 0，也不能按数值处理——前导 0 会被吃掉。
+            // ⚠️ 11 位数字与手机号同形，提示必须点明，否则用户会把手机号输进来。
+            hint = "11 位数字授权码（不是手机号）"
+            inputType = InputType.TYPE_CLASS_NUMBER
+            filters = arrayOf(InputFilter.LengthFilter(KEY_LENGTH))
             setSingleLine(true)
             setPadding(28, 18, 28, 18)
         }
@@ -791,9 +801,16 @@ class MainActivity : AppCompatActivity() {
         dialog.setOnShowListener {
             val button = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
             button.setOnClickListener {
-                val code = input.text?.toString()?.trim().orEmpty()
-                if (code.isBlank()) {
+                // 从微信/短信复制常带空格、全角字符或不可见字符，先规范化再判长度。
+                // 本地只判「长度与字符集」，**不判真假**——真伪只有服务端知道。
+                val code = input.text?.toString().orEmpty()
+                    .replace(Regex("[\\s\\u00A0\\u3000-]"), "")
+                if (code.isEmpty()) {
                     input.error = "请输入授权密钥"
+                    return@setOnClickListener
+                }
+                if (!Regex("^\\d{$KEY_LENGTH}$").matches(code)) {
+                    input.error = "授权码是 $KEY_LENGTH 位数字（旧格式密钥已停用，请联系管理员换发）"
                     return@setOnClickListener
                 }
                 button.isEnabled = false
@@ -821,6 +838,12 @@ class MainActivity : AppCompatActivity() {
     private fun formatDateTime(millis: Long): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(millis))
 
+    /**
+     * 密钥掩码。
+     *
+     * 服务端 `maskKey()` 对数字密钥返回 `•••••••{last4}`（前 7 位已隐去），
+     * 这里检测到 `•` 就原样用，**绝不再套一层**，否则界面会出现两段掩码。
+     */
     private fun maskCode(code: String): String = when {
         code.contains("•") -> code
         code.length <= 4 -> "••••"
@@ -1370,6 +1393,12 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "主界面"
+
+        /** 授权密钥长度。与服务端 `security.js` 的 `KEY_LENGTH` 必须一致 */
+        private const val KEY_LENGTH = 11
+
+        /** 授权复核周期：距上次成功握手超过这个时长，回前台时重握手一次 */
+        private const val AUTHORIZATION_REFRESH_MS = 6 * 60 * 60 * 1000L
 
         /** 落盘日志文件名。与 DebugChannel 里的 CMD_FILE/LOG_FILE 同一目录，联调用同一个文件 */
         private const val LOG_FILE_NAME = "runtime.log"

@@ -28,6 +28,10 @@ class RemoteLicenseProvider(context: Context) : LicenseProvider {
     private val store = TokenStore(appContext)
     private val api = LicenseApi()
 
+    /** 上一次真的发过握手请求的时刻（成功失败都算），用于失败节流 */
+    @Volatile
+    private var lastAttemptAt = 0L
+
     private val _state = MutableStateFlow(
         LicenseStatus(
             authorized = false,
@@ -141,6 +145,27 @@ class RemoteLicenseProvider(context: Context) : LicenseProvider {
                 }
             }
         )
+    }
+
+    /**
+     * 距上次成功握手超过 [maxAgeMs] 才真的握手。
+     *
+     * 两层节流，缺一不可：
+     * ① [maxAgeMs]（调用方给 6 小时）——业务语义上「多久算不新鲜」；
+     * ② [MIN_ATTEMPT_INTERVAL_MS]（30 分钟）——**失败也要节流**。`lastHandshakeAt` 只在
+     *    persist 成功时才更新，如果只按它判断，网络一直不通就会每次 onResume 都发一次请求，
+     *    在地铁里频繁切前后台会打出一串无意义的重试。
+     */
+    override suspend fun refreshIfStale(maxAgeMs: Long) {
+        val now = System.currentTimeMillis()
+        if (now - lastAttemptAt < MIN_ATTEMPT_INTERVAL_MS) return
+        val saved = store.load() ?: return
+        if (!_state.value.authorized) return
+        val last = saved.optLong("lastHandshakeAt", 0L)
+        if (last > 0 && now - last < maxAgeMs) return
+        lastAttemptAt = now
+        Log.i(TAG, "距上次握手 $((now - last) / 60_000) 分钟，重握手一次")
+        handshake()
     }
 
     override suspend fun unbind(): Result<Unit> = withContext(Dispatchers.IO) {
@@ -289,6 +314,9 @@ class RemoteLicenseProvider(context: Context) : LicenseProvider {
 
     companion object {
         private const val TAG = "RemoteLicense"
+
+        /** 两次握手尝试之间的最小间隔（失败也计入），避免网络差时频繁重试 */
+        private const val MIN_ATTEMPT_INTERVAL_MS = 30 * 60 * 1000L
         private const val SOURCE = "REMOTE"
         private val CLEAR_TOKEN_CODES = setOf(
             "TOKEN_INVALID", "TOKEN_EXPIRED", "DEVICE_UNBOUND", "DEVICE_BLOCKED",

@@ -37,6 +37,15 @@ interface LicenseProvider {
     /** App 回前台/手动刷新时调用。 */
     suspend fun handshake(): Result<LicenseStatus>
 
+    /**
+     * 距上次成功握手超过 [maxAgeMs] 才真的握手，否则立即返回。
+     *
+     * 存在的理由：原来只在 `MainActivity.onCreate` 握一次手。用户把 App 常驻前台跑几小时，
+     * 期间授权被服务端停用/到期，客户端**完全不会知道**（离线宽限默认 72 小时），
+     * 表现为「明明已经停用，脚本还在跑」。
+     */
+    suspend fun refreshIfStale(maxAgeMs: Long) = Unit
+
     /** 解绑当前设备。 */
     suspend fun unbind(): Result<Unit>
 }

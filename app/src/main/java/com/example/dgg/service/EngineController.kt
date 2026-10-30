@@ -2,6 +2,7 @@ package com.example.dgg.service
 
 import android.content.Context
 import com.example.dgg.data.LogStore
+import com.example.dgg.data.license.LicenseGate
 import com.example.dgg.engine.Flow
 import com.example.dgg.engine.TaskEngine
 import com.example.dgg.util.ActiveWindow
@@ -23,6 +24,18 @@ object EngineController {
 
     fun start(context: Context, flow: Flow, launchDouyin: Boolean = true): Result<Unit> {
         val app = context.applicationContext
+
+        // 授权门禁放最前面。
+        //
+        // 这里才是**唯一**能真正阻止任务运行的地方：界面上的 `btnStartService.isEnabled`
+        // 与 `toast("请先激活授权")` 只覆盖「用户从主界面点开始」这一条路径，
+        // 悬浮窗的「重试」（restartLast）、通知栏入口都绕得过。授权被停用/过期时，
+        // 只要进程还在就能把任务重新拉起来——这是本轮补上的最大一个口子。
+        if (!LicenseGate.isAuthorized()) {
+            val reason = LicenseGate.reason()
+            LogStore.e(TAG, "拒绝启动：授权无效（$reason）")
+            return Result.failure(IllegalStateException("授权无效：$reason"))
+        }
 
         if (!DggAccessibilityService.isConnected()) {
             LogStore.e(TAG, "拒绝启动：无障碍服务未连接")

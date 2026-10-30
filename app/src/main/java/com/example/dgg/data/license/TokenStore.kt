@@ -5,6 +5,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
+import com.example.dgg.data.LogStore
 import org.json.JSONObject
 import java.security.KeyStore
 import javax.crypto.Cipher
@@ -50,9 +51,21 @@ class TokenStore(context: Context) {
             cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, iv))
             val plain = cipher.doFinal(encrypted)
             JSONObject(String(plain, Charsets.UTF_8))
-        }.onFailure {
-            Log.w(TAG, "读取设备令牌失败：${it.javaClass.simpleName}")
-            clear()
+        }.onFailure { error ->
+            val name = error.javaClass.simpleName
+            val message = error.message.orEmpty()
+            LogStore.w(TAG, "读取设备令牌失败：$name / $message")
+            // 只有「密文与密钥确实对不上」才销毁；Keystore 的临时故障（节点被系统回收、锁屏态访问）
+            // 不代表令牌失效，保留密文让下次启动再试——否则一次偶发失败就要求用户重新激活。
+            val fatal = error is javax.crypto.AEADBadTagException ||
+                error is java.security.UnrecoverableKeyException ||
+                name.contains("KeyPermanentlyInvalidated")
+            if (fatal) {
+                LogStore.w(TAG, "令牌密文无法恢复（$name），已清除，需要重新激活")
+                clear()
+            } else {
+                LogStore.w(TAG, "保留密文，下次启动重试解密")
+            }
         }.getOrNull()
     }
 
