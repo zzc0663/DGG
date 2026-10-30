@@ -85,15 +85,30 @@ class FlowContext(
         }
     }
 
+    /** 上一次真正做风控检查的时刻（[SystemClock.uptimeMillis]），见 [guard] 的降频说明 */
+    private var lastGuardAt = 0L
+
     /**
      * 查风控；命中直接抛出，流程无从忽略。
      *
-     * 走快照而不是自己再遍历一遍：连续动作之间界面没变，快照还能用（700ms 内），
-     * 省下的是实打实的时间——一趟全树遍历在这台真机的直播间里要 1.4 秒，
-     * 而每次 [settle] 都会查一次。
+     * 走快照而不是自己再遍历一遍：连续动作之间界面没变，快照还能用，省下的是实打实的时间。
+     *
+     * ⚠️ **必须降频**（2026-10-30 真机日志 R-20261030-A88080）：直播间在播视频时一通
+     * 全树遍历实测 **5~16 秒**（610 节点 / 16099ms），而一次关注流程里有 4~5 个
+     * `settle()`，每个后面都跟一次 guard —— 光风控检查就吃掉 60 秒，表现出来就是
+     * 「关注完界面卡住不动」。风控提示是持续可见的（弹窗/文案不会一闪就没），
+     * 隔 [GUARD_MIN_INTERVAL_MS] 查一次完全够；真正的「点完立刻要查」的场合（M3 发评论）
+     * 传 `force = true`。
+     *
+     * @param force 忽略降频，立刻真查一次
      */
-    suspend fun guard() {
-        AnomalyGuard.check(actions.snapshot())?.let { throw AnomalyStopException(it) }
+    suspend fun guard(force: Boolean = false) {
+        val now = SystemClock.uptimeMillis()
+        if (!force && now - lastGuardAt < GUARD_MIN_INTERVAL_MS) return
+        lastGuardAt = now
+        // TTL 与降频窗口一致：上一次检查刚抓的快照直接复用，不重复遍历
+        AnomalyGuard.check(actions.snapshot(ttlMs = GUARD_MIN_INTERVAL_MS))
+            ?.let { throw AnomalyStopException(it) }
     }
 
     /**
@@ -151,6 +166,19 @@ class FlowContext(
 
     private companion object {
         const val PUBLISH_EVERY_MS = 10_000L
+
+        /**
+         * 两次风控检查之间的最小间隔。
+         *
+         * 一次全树遍历在直播间实测 **5~16 秒**（`R-20261030-A88080`：610 节点 / 16099ms），
+         * 而 [settle] 每个动作后都会调 [guard]。等待新评论的轮询是 800ms 一轮，
+         * 间隔太小等于「每两三秒就烧掉十几秒」——这正是「评论刷新卡顿」的一大半。
+         *
+         * 5 秒的依据：风控提示（弹窗、半屏浮层、页内红字）都是**持续可读**的，
+         * 不是一闪就没的 toast；沙箱里最坏晚 5 秒发现，也不会让「临时限流」升级成封号。
+         * 真正需要「点完立刻查」的场合（M3 发评论后的 toast 类提示）传 `force = true`。
+         */
+        const val GUARD_MIN_INTERVAL_MS = 5_000L
     }
 
     suspend fun awaitResume() = resumeWaiter()

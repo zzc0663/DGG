@@ -260,7 +260,8 @@ class FollowFromLiveFlow : Flow {
                     // 关键：必须等到界面真的变成「已关注」才算成功，不接受「点了就当成功」。
                     // 但私密账号是**例外中的例外**——它永远不会变成已关注，只会变成申请态，
                     // 所以要在同一趟判据里先认出来，认出即返回，不等满 6 秒。
-                    val outcome = awaitFollowOutcome(ctx, targets, VERIFY_TIMEOUT_MS)
+                    // 传 button：优先「刷新这颗按钮读文案」（毫秒级），而不是每轮重走一遍全树。
+                    val outcome = awaitFollowOutcome(ctx, targets, VERIFY_TIMEOUT_MS, button)
                     when (outcome.state) {
                         CardState.PRIVATE -> {
                             // 关注动作已经发出去了（申请），但粉丝数不会增加、额度也白占。
@@ -598,6 +599,28 @@ class FollowFromLiveFlow : Flow {
      */
     private var cachedCommentList: AccessibilityNodeInfo? = null
 
+    /** 缓存判活：**必须用 `refresh()`**，不能拿 `performAction` 的返回值当判活（见 [scrollCommentsToNewest]） */
+    private fun commentListAlive(node: AccessibilityNodeInfo?): Boolean =
+        node != null && runCatching { node.refresh() && node.isScrollable }.getOrDefault(false)
+
+    /**
+     * 拿评论容器，**只走快通道**：缓存 → view id。拿不到就返回 null（调用方退回整树）。
+     *
+     * 刻意**不**用 [resolveCommentListFresh] 里的「按区域遍历找 scrollable」兜底：
+     * 那是一次全树 BFS，在播视频的直播间要 8~16 秒，而这里是被每轮扫描调用的热路径。
+     * 与其在这里等 16 秒，不如退一步用整树 collect（一趟，同样的钱还顺带采到人）。
+     */
+    private fun commentContainerForScan(ctx: FlowContext): AccessibilityNodeInfo? {
+        if (commentListAlive(cachedCommentList)) return cachedCommentList
+        cachedCommentList = null
+        val byId = runCatching { ctx.actions.findByViewId(COMMENT_LIST_VIEW_ID) }
+            .getOrNull()
+            ?.takeIf { it.isScrollable }
+            ?: return null
+        cachedCommentList = byId
+        return byId
+    }
+
     /** 重建：先按 view id（快、稳），失败再按区域遍历（抖音改版换了混淆 id 时的退路） */
     private fun resolveCommentListFresh(ctx: FlowContext): AccessibilityNodeInfo? =
         ctx.actions.findByViewId(COMMENT_LIST_VIEW_ID)?.takeIf { it.isScrollable }
@@ -645,8 +668,7 @@ class FollowFromLiveFlow : Flow {
         var reusedCache = false
         var scrolled = false
         cachedCommentList?.let { node ->
-            val alive = runCatching { node.refresh() && node.isScrollable }.getOrDefault(false)
-            if (alive) {
+            if (commentListAlive(node)) {
                 reusedCache = true
                 scrolled = ctx.actions.scrollForward(node, "评论区")
             } else {
@@ -778,7 +800,10 @@ class FollowFromLiveFlow : Flow {
 
         // ① 先刷新。间隔太短（< 3s）时不值得为它插一段探测，交给下一轮的即时刷新兜底
         if (intervalMs == 0L || intervalMs >= REFRESH_MIN_INTERVAL_MS) {
-            ctx.settle(REFRESH_PROBE_MS)
+            // 裸 delay（不是 ctx.settle）：那会给这段等待多挂一次全树风控检查（8~16 秒），
+            // 而这里要的只是「等资料卡收起的动画走完」，300ms 足够。
+            // 刷新本身走评论容器缓存（6~12ms）+ 必要时一趟 findFirst，不再依赖整树快照。
+            delay(REFRESH_PROBE_MS)
             if (!shouldInterrupt()) refreshComments(ctx, reason)
         }
 
@@ -797,16 +822,21 @@ class FollowFromLiveFlow : Flow {
      *
      * 走快照而不是 `find`：输入栏的位置在一轮里不会变，没必要为它再跑一趟全树遍历。
      */
-    private fun rowBottomLimit(ctx: FlowContext, targets: LiveTargets): Int {
-        val input = targets.input
-        if (input != null) {
-            val tops = ctx.actions.snapshot(ttlMs = INPUT_BAR_CACHE_MS)
-                .filter { ctx.actions.matchesFacts(it, input) && it.top > 0 }
-                .map { it.top }
-            if (tops.isNotEmpty()) return tops.min() - ROW_LIMIT_MARGIN
-        }
-        return (ctx.actions.screenHeight() * FALLBACK_ROW_LIMIT_RATIO).toInt()
-    }
+    /**
+     * 评论行可点的**下边界**：压到输入栏上的行不点（点歪会弹键盘）。
+     *
+     * ⚠️ 这里**刻意不读输入栏位置**（2026-10-30）。老实现每次都调
+     * `snapshot(ttlMs = 5000)` 找「说点什么」，而在慢遍历的直播间里一次就是 8~16 秒——
+     * 它和 `collect` 一趟叠在一起，让「一次扫描」变成两趟全树（16~32 秒），
+     * 这正是「评论刷新卡顿」最大的单项。
+     *
+     * 用屏高比例代替：真实机 40.8.0 实测输入栏顶 = 屏高 91.4%（2188/2374），
+     * 评论行最大底边 2104（88.6%），两边都有余量。[FALLBACK_ROW_LIMIT_RATIO] 取 0.915
+     * 落在两者之间，误差几像素，最多多放过一条紧贴输入栏的行 ——
+     * 而点击本身还走 [Actions.tapNickname] 的「贴行上部取点」，不会落到输入框上。
+     */
+    private fun rowBottomLimit(ctx: FlowContext): Int =
+        (ctx.actions.screenHeight() * FALLBACK_ROW_LIMIT_RATIO).toInt()
 
     // ==================== 候选采集 ====================
 
@@ -900,20 +930,46 @@ class FollowFromLiveFlow : Flow {
     ): Scan {
         var raw: List<Pair<String, AccessibilityNodeInfo>> = emptyList()
         var source = "主路径"
+        var scoped = false
+
+        // **在评论容器子树里采集**，不再从整棵树开始 BFS。
+        //
+        // 为什么这是本流程最要紧的一条（2026-10-30 真机日志 R-20261030-A88080）：
+        // 直播间在播视频时，一通全树遍历实测 5~16 秒（610 节点 / 16099ms，每节点 26ms，
+        // 是健康值的 10 倍以上——系统对无障碍 IPC 的节流）。而评论容器 r68 的子树只有
+        // 几十个节点，同样的遍历只要几百毫秒。以前每轮扫描要跑**两趟**全树
+        // （collect 一趟 + rowBottomLimit 的 snapshot 一趟），光扫描就 16~32 秒。
+        //
+        // 拿不到容器（抖音改版换了混淆 id）就退回整树，行为与旧版一致，不会采不到人。
+        val root = commentContainerForScan(ctx)
+        if (root != null) scoped = true
+
         if (targets.nickname != null) {
-            raw = ctx.actions.collect(targets.nickname, MAX_COLLECT)
+            raw = ctx.actions.collect(targets.nickname, MAX_COLLECT, root)
                 .mapNotNull { node -> ctx.actions.labelOf(node)?.let { label -> label to node } }
         }
         if (raw.isEmpty() && targets.line != null) {
             source = "冒号切分兜底"
-            raw = ctx.actions.collect(targets.line, MAX_COLLECT)
+            raw = ctx.actions.collect(targets.line, MAX_COLLECT, root)
                 .mapNotNull { node ->
                     val label = ctx.actions.labelOf(node) ?: return@mapNotNull null
                     splitNickname(label)?.let { name -> name to node }
                 }
         }
+        // 容器内一条都没读到：容器可能只是一个空壳（列表还没挂上），退回整树再采一次。
+        // 这一趟只在异常情况下发生，正常运行时每轮只花掉容器内那点时间。
+        if (raw.isEmpty() && scoped && targets.line != null) {
+            source = "冒号切分兜底(整树兜底)"
+            LogStore.d(TAG, "评论容器内未采到任何评论行，退回整棵树采集")
+            raw = ctx.actions.collect(targets.line, MAX_COLLECT, null)
+                .mapNotNull { node ->
+                    val label = ctx.actions.labelOf(node) ?: return@mapNotNull null
+                    splitNickname(label)?.let { name -> name to node }
+                }
+        }
+        if (scoped && !source.contains("整树")) source += "(容器内)"
 
-        val limit = rowBottomLimit(ctx, targets)
+        val limit = rowBottomLimit(ctx)
         val now = SystemClock.uptimeMillis()
         val best = LinkedHashMap<String, Candidate>(raw.size)
         var rows = 0
@@ -1038,7 +1094,10 @@ class FollowFromLiveFlow : Flow {
             //
             // 顺序是**先已关注、后私密**：一个人如果已经被通过申请，卡里是「取消关注」，
             // 那他就是真的已关注，该记进已关注名单；私密标记只是补充证据。
-            val facts = ctx.actions.snapshot(ttlMs = 0)
+            //
+            // lean = true：这里只用 text/desc/bounds，没必要为 id / editable 多付
+            // 两次跨进程调用（610 节点上省 25%~30%）。页面与浮层判定同样不用 ID。
+            val facts = ctx.actions.snapshot(ttlMs = 0, lean = true)
             val topLimit = cardTopLimit(ctx)
             if (alreadyFollowedIn(facts, targets, topLimit)) {
                 return CardProbe(CardState.ALREADY_FOLLOWED)
@@ -1072,17 +1131,44 @@ class FollowFromLiveFlow : Flow {
      * - 私密账号要**立刻**返回（申请文案一出现就能确定），不能陪着等满 6 秒；
      * - 超时才需要把弹层现有文案 dump 出来——那是唯一能把「没收录的新文案」变成证据的地方。
      *
-     * 每轮只跑**一趟**快照（ttl = 0，不能吃缓存），两个判据在内存里比对。
+     * **判据优先级（2026-10-30 重构，解决「关注完卡住十几秒」）**：
+     * 1. 手上有刚点过的那颗按钮 → **刷新它、读它的文案**（1~3 次 IPC，毫秒级）。
+     *    抖音点关注后就地把按钮文案换成「取消关注 / 申请关注」，根本不需要重读整棵树；
+     * 2. 只有按钮节点**脱离节点树**（`refresh()` 返回 false，抖音重建了资料卡）时，
+     *    才退回整树快照（播视频的直播间里 8~16 秒一趟，只在异常时付这笔钱）。
+     *
+     * 旧实现是「每 250ms 跑一趟 ttl=0 的全树快照」，而一趟要 8~16 秒 ——
+     * 于是「等关注结果」实际耗时 10 秒以上，被用户感知成「关注完界面卡死」。
+     *
+     * @param button 刚点下去的「关注」按钮节点；null 表示调用方没有，直接走整树通道
      */
     private suspend fun awaitFollowOutcome(
         ctx: FlowContext,
         targets: LiveTargets,
-        timeoutMs: Long
+        timeoutMs: Long,
+        button: AccessibilityNodeInfo? = null
     ): CardProbe {
         val deadline = SystemClock.uptimeMillis() + timeoutMs
+        var useButton = button != null
         while (SystemClock.uptimeMillis() < deadline) {
             if (ctx.stopped()) return CardProbe(CardState.UNKNOWN)
-            val facts = ctx.actions.snapshot(ttlMs = 0)
+
+            if (useButton) {
+                val quick = quickProbe(button!!, targets, ctx.config.privateAccountHints)
+                quick.result?.let { return it }
+                if (!quick.nodeAlive) {
+                    LogStore.d(TAG, "关注按钮节点已脱离节点树（资料卡被重建），改走整树判定")
+                    useButton = false
+                }
+                // 按钮还活着、文案还没变：只是界面还没刷新，继续毫秒级轮询，别去跑全树
+                delay(CARD_POLL_MS)
+                continue
+            }
+
+            // lean = true：这条路径只用 text/desc/bounds，跳过 id 与 editable 两次跨进程调用
+            // （每节点从 7 次降到 5 次，实测省 25%~30%）。页面/浮层/风控判定同样不用 ID，
+            // 所以这份快照进缓存后对它们是安全的。
+            val facts = ctx.actions.snapshot(ttlMs = 0, lean = true)
             val topLimit = cardTopLimit(ctx)
             if (alreadyFollowedIn(facts, targets, topLimit)) {
                 return CardProbe(CardState.ALREADY_FOLLOWED)
@@ -1093,6 +1179,46 @@ class FollowFromLiveFlow : Flow {
             delay(CARD_POLL_MS)
         }
         return CardProbe(CardState.UNKNOWN)
+    }
+
+    /** [quickProbe] 的结论：`result` 非空 = 已能定论；`nodeAlive` = 节点是否还能 refresh */
+    private class QuickProbe(val result: CardProbe?, val nodeAlive: Boolean)
+
+    /**
+     * 毫秒级判据：刷新**那颗被点过的按钮**，只看它自己的文案。
+     *
+     * 为什么够用：抖音的资料卡只有一颗主按钮，点「关注」之后它会就地变成
+     * 「取消关注」（成功）/「申请关注」（私密账号），文本就直接挂在**同一个节点**上。
+     * 而 `refresh()` + 读 text/desc 只要 1~3 次跨进程调用，对比整树快照的
+     * 610 节点 × 5 = 3000 次调用，差三个数量级。
+     *
+     * 匹配一律**全等**（与 [privateEvidenceIn] 同口径）：包含匹配会让「关注」命中
+     * 「申请关注」，把所有成功都判成私密账号。
+     */
+    private fun quickProbe(
+        button: AccessibilityNodeInfo,
+        targets: LiveTargets,
+        hints: Set<String>
+    ): QuickProbe {
+        val alive = runCatching { button.refresh() }.getOrDefault(false)
+        if (!alive) return QuickProbe(null, false)
+        val text = runCatching { button.text?.toString()?.trim() }.getOrNull()
+        val desc = runCatching { button.contentDescription?.toString()?.trim() }.getOrNull()
+        when {
+            // 「已关注」是第三种态（部分版本的资料卡按钮直接写这三个字，不是「取消关注」）。
+            // 只在**按钮自身**的文案上认它，不进全局 ALREADY_FOLLOWED_TEXTS——
+            // 全树判定里放行「已关注」会让「已关注你」这类半句文案被误判成成功。
+            text != null && (ALREADY_FOLLOWED_TEXTS.contains(text) ||
+                text == targets.followed.value || text == FOLLOWED_ALT_TEXT) ->
+                return QuickProbe(CardProbe(CardState.ALREADY_FOLLOWED), true)
+
+            text != null && hints.contains(text) ->
+                return QuickProbe(CardProbe(CardState.PRIVATE, evidence = text), true)
+
+            desc != null && hints.contains(desc) ->
+                return QuickProbe(CardProbe(CardState.PRIVATE, evidence = desc), true)
+        }
+        return QuickProbe(null, true)
     }
 
     /**
@@ -1201,7 +1327,10 @@ class FollowFromLiveFlow : Flow {
         if (!ctx.actions.back()) {
             LogStore.w(TAG, "返回键未生效，弹层可能仍在（下一轮会重新判断）")
         }
-        ctx.settle(CLOSE_SETTLE_MS)
+        // 裸 delay 而不是 ctx.settle：settle 末尾会 guard()，而手势已经把快照缓存作废了
+        // ⇒ 一次全树遍历 8~16 秒。这里紧接着的动作是「滚评论」（非点击、非付费），
+        // 风控交给主循环每轮的 guard（2.5 秒降频）就够了，不值得为它再等十几秒。
+        delay(CLOSE_SETTLE_MS)
     }
 
     /**
@@ -1212,7 +1341,8 @@ class FollowFromLiveFlow : Flow {
      * 这里只判「在不在」，不需要挑出面积最大的那颗按钮，所以一趟快照就够。
      */
     private fun cardStillOpen(ctx: FlowContext, targets: LiveTargets): Boolean {
-        val facts = ctx.actions.snapshot(ttlMs = 0)
+        // lean：只判「关注按钮还在 / 已是已关注态」，两件事都只看 text/desc/bounds
+        val facts = ctx.actions.snapshot(ttlMs = 0, lean = true)
         val topLimit = cardTopLimit(ctx)
         if (alreadyFollowedIn(facts, targets, topLimit)) return true
         return facts.any { fact ->
@@ -1257,7 +1387,7 @@ class FollowFromLiveFlow : Flow {
      */
     private fun cardLabelsDump(ctx: FlowContext): String {
         val topLimit = cardTopLimit(ctx)
-        val labels = ctx.actions.snapshot(ttlMs = 0)
+        val labels = ctx.actions.snapshot(ttlMs = 0, lean = true)
             .filter { it.bottom > topLimit }
             .mapNotNull { it.text?.trim()?.takeIf { t -> t.isNotEmpty() && t.length <= CARD_LABEL_MAX_LEN } }
             .distinct()
@@ -1269,9 +1399,7 @@ class FollowFromLiveFlow : Flow {
         val nickname: Target?,
         val line: Target?,
         val follow: Target,
-        val followed: Target,
-        /** 评论输入区，用来量出「评论行的下边界」，避免点评论时点到输入框 */
-        val input: Target?
+        val followed: Target
     ) {
         companion object {
             fun from(config: LocatorConfig): LiveTargets {
@@ -1290,8 +1418,7 @@ class FollowFromLiveFlow : Flow {
                     nickname = nickname,
                     line = line,
                     follow = follow,
-                    followed = followed,
-                    input = config.target("comment_input")
+                    followed = followed
                 )
             }
         }
@@ -1356,13 +1483,16 @@ class FollowFromLiveFlow : Flow {
         const val JUMP_SETTLE_MS = 1_200L
 
         /**
-         * 关注成功后**先等这么久再去探浮标**。
+         * 关注成功后、真正去刷评论之前的那一下短等。
          *
-         * 抖音要攒够几条新评论才浮出「N条新消息」，刚关掉资料卡时常常还是 0 条
-         * （真机 22:56:14 / 22:57:01 两次都是「没有浮标」）。2.5 秒是热门直播间里
-         * 攒到 1~3 条的典型时长，再长就纯属白等。
+         * 只要 300ms：**等资料卡收起的动画走完**就够了。
+         *
+         * 旧值是 2500ms，理由是「抖音要攒够几条新评论才浮出『N条新消息』，等它出现再点」。
+         * 那条理由现在已经不成立：刷新通道的第一选择是**直接滚评论容器**
+         * （缓存命中 6~12ms），根本不需要等浮标。固定等 2.5 秒 + 后面跟一次全树风控检查，
+         * 让「关注成功 → 评论动」硬生生晚 4 秒，是「刷新评论卡顿」里最容易感知的一段。
          */
-        const val REFRESH_PROBE_MS = 2_500L
+        const val REFRESH_PROBE_MS = 300L
 
         /** 扫描间隔小于这个值时不插探测：间隔本身就短，交给下一轮的即时刷新兜底 */
         const val REFRESH_MIN_INTERVAL_MS = 3_000L
@@ -1408,9 +1538,6 @@ class FollowFromLiveFlow : Flow {
          */
         const val SCROLL_DIAGNOSE = false
 
-        /** 评论行下边界 = 输入栏顶 - 这个余量（实测最新一行底部 2170、输入栏顶 2188） */
-        const val ROW_LIMIT_MARGIN = 8
-
         /**
          * 可点评论行的最小高度。
          *
@@ -1420,11 +1547,13 @@ class FollowFromLiveFlow : Flow {
          */
         const val MIN_ROW_HEIGHT = 20
 
-        /** 输入栏位置在一轮里不会变，量它时允许吃几秒前的快照，省一趟全树遍历 */
-        const val INPUT_BAR_CACHE_MS = 5_000L
-
-        /** 拿不到输入栏位置时按屏高比例兜底（实测输入栏顶 ≈ 屏高 91%） */
-        const val FALLBACK_ROW_LIMIT_RATIO = 0.92
+        /**
+         * 评论行下边界占屏比，**纯比例、不跑遍历**（见 [rowBottomLimit]）。
+         *
+         * 真机 40.8.0：屏高 2374、输入栏顶 2188（91.4%）、最底一行评论 bottom 2104（88.6%）。
+         * 0.915 落在两者之间，误差几像素。
+         */
+        const val FALLBACK_ROW_LIMIT_RATIO = 0.915
 
         const val TAP_SETTLE_MS = 600L
         const val COMMENT_WAIT_MS = 2_500L
@@ -1481,6 +1610,14 @@ class FollowFromLiveFlow : Flow {
          * 配置里的 followed_button 恒为「取消关注」，这里再兜一层互关。
          */
         val ALREADY_FOLLOWED_TEXTS = listOf("取消关注", "互相关注")
+
+        /**
+         * 资料卡按钮的第三种「已关注」写法。
+         *
+         * 只在 [quickProbe] 里认——那里读的是**按钮节点自己**的文案，
+         * 不会把弹层正文里的「已关注你」误当成成功。
+         */
+        const val FOLLOWED_ALT_TEXT = "已关注"
 
         /**
          * 点评论行有时弹出的是快捷操作栏而不是资料卡，栏里这一项才是资料卡入口。

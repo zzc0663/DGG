@@ -294,8 +294,10 @@ class LiveInteractFlow : Flow {
             return false
         }
 
-        // 「评论过快」通常是一条一闪而过的 toast，发完立刻查一次最有价值
-        ctx.guard()
+        // 「评论过快」通常是一条一闪而过的 toast，发完立刻查一次最有价值。
+        // **必须 force**：guard 有 5 秒降频窗口，而前面刚 settle 过（已经查了一次），
+        // 不强制的话这一下会被跳过 —— 而它恰恰是唯一能抓到那条 toast 的时机。
+        ctx.guard(force = true)
         return awaitSubmitted(ctx, targets, text)
     }
 
