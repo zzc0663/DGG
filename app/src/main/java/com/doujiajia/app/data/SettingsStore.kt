@@ -41,12 +41,10 @@ class SettingsStore private constructor(context: Context) {
     private fun readFromSp(): Settings {
         val d = Settings()
         return Settings(
-            calMode = sp.getInt(KEY_CAL_MODE, d.calMode),
             followTarget = sp.getInt(KEY_FOLLOW_TARGET, d.followTarget),
             scanIntervalValue = sp.getInt(KEY_SCAN_VALUE, migrateScanValue()),
             scanIntervalUnit = sp.getInt(KEY_SCAN_UNIT, d.scanIntervalUnit),
             dailyLimit = sp.getInt(KEY_DAILY_LIMIT, d.dailyLimit),
-            jitterPercent = sp.getInt(KEY_JITTER, d.jitterPercent),
             idleLive = sp.getBoolean(KEY_IDLE_LIVE, d.idleLive),
             applyMic = sp.getBoolean(KEY_APPLY_MIC, d.applyMic),
             continueAfterMic = sp.getBoolean(KEY_CONTINUE_MIC, d.continueAfterMic),
@@ -75,12 +73,10 @@ class SettingsStore private constructor(context: Context) {
 
     private fun writeAll(s: Settings) {
         sp.edit()
-            .putInt(KEY_CAL_MODE, s.calMode)
             .putInt(KEY_FOLLOW_TARGET, s.followTarget)
             .putInt(KEY_SCAN_VALUE, s.scanIntervalValue)
             .putInt(KEY_SCAN_UNIT, s.scanIntervalUnit)
             .putInt(KEY_DAILY_LIMIT, s.dailyLimit)
-            .putInt(KEY_JITTER, s.jitterPercent)
             .putBoolean(KEY_IDLE_LIVE, s.idleLive)
             .putBoolean(KEY_APPLY_MIC, s.applyMic)
             .putBoolean(KEY_CONTINUE_MIC, s.continueAfterMic)
@@ -122,7 +118,6 @@ class SettingsStore private constructor(context: Context) {
     companion object {
         private const val SP_NAME = "dgg_settings"
 
-        private const val KEY_CAL_MODE = "cal_mode"
         private const val KEY_FOLLOW_TARGET = "follow_target"
         private const val KEY_SCAN_VALUE = "scan_interval_value"
         private const val KEY_SCAN_UNIT = "scan_interval_unit"
@@ -130,7 +125,9 @@ class SettingsStore private constructor(context: Context) {
         private const val KEY_SCAN_INTERVAL_LEGACY = "scan_interval"
         private const val LEGACY_DEFAULT_SCAN_MS = Settings.DEFAULT_SCAN_VALUE * 1000
         private const val KEY_DAILY_LIMIT = "daily_limit"
-        private const val KEY_JITTER = "jitter_percent"
+        // vc49 起删除：cal_mode（校准模式，从未接入逻辑）与 jitter_percent（延迟抖动，
+        // 改为固定 Settings.HUMANIZE_JITTER）。老用户 SP 里的这两个键不读也不清，
+        // 留在文件里只有几字节，删了反而要写迁移代码。
         private const val KEY_IDLE_LIVE = "idle_live"
         private const val KEY_APPLY_MIC = "apply_mic"
         private const val KEY_CONTINUE_MIC = "continue_after_mic"

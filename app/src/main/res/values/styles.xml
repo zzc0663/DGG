@@ -67,6 +67,24 @@
         <item name="android:inputType">number</item>
     </style>
 
+    <!-- 迷你输入框：用在「每关注 [N] 个后休息 [M] 秒」这种内联一行里。
+         宽度固定，居中显示数字；去掉 InputBox 的左右 12dp 内边距，否则 52dp 里放不下 3 位数。 -->
+    <style name="InputMini" parent="Widget.AppCompat.EditText">
+        <item name="android:layout_width">52dp</item>
+        <item name="android:layout_height">32dp</item>
+        <item name="android:background">@drawable/bg_input</item>
+        <item name="android:paddingStart">2dp</item>
+        <item name="android:paddingEnd">2dp</item>
+        <item name="android:paddingTop">0dp</item>
+        <item name="android:paddingBottom">0dp</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textColor">@color/text_primary</item>
+        <item name="android:textColorHint">@color/text_tertiary</item>
+        <item name="android:gravity">center</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:inputType">number</item>
+    </style>
+
     <!-- ============ 分段选择器 / 标签 ============ -->
     <style name="SegItem">
         <item name="android:layout_width">0dp</item>
@@ -78,6 +96,14 @@
         <item name="android:background">@drawable/bg_segment_normal</item>
         <item name="android:clickable">true</item>
         <item name="android:focusable">true</item>
+    </style>
+
+    <!-- 窄列里的单位切换（「秒 | 分钟」）。三列布局每列只有 96dp，
+         14sp + 38dp 会把两格挤爆，这里降到 12sp / 28dp。
+         选中态由 bindSegmented 运行时设 background/textColor，不需要单独的 Selected 样式。 -->
+    <style name="SegMini" parent="SegItem">
+        <item name="android:layout_height">28dp</item>
+        <item name="android:textSize">12sp</item>
     </style>
 
     <style name="SegItemSelected" parent="SegItem">

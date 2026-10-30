@@ -492,10 +492,6 @@ class MainActivity : AppCompatActivity() {
     private fun bindAutoFollow(s: Settings) {
         val c = binding.contentAuto
 
-        bindSegmented(
-            listOf(c.segManualCal, c.segAutoCal), s.calMode, grouped = true
-        ) { index -> store.edit { it.copy(calMode = index) } }
-
         val followMin = Settings.FOLLOW_COUNT_MIN
         val followMax = Settings.FOLLOW_COUNT_MAX
         bindRangedIntField(c.etFollowTarget, s.followTarget, followMin, followMax) { v ->
@@ -509,23 +505,42 @@ class MainActivity : AppCompatActivity() {
             store.edit { it.copy(dailyLimit = v) }
             LogStore.i(TAG, "每日关注上限 = $v")
         }
-        bindIntField(c.etJitter, s.jitterPercent) { v -> store.edit { it.copy(jitterPercent = v) } }
 
         // 扫描间隔 = 数值 + 单位，单位切换时按总时长换算
         bindScanInterval(c)
 
-        bindSwitch(c.swIdleLive, s.idleLive) { v ->
-            store.edit { it.copy(idleLive = v) }
-            LogStore.i(TAG, "空闲时直播互动 = $v")
-        }
-        bindSwitch(c.swApplyMic, s.applyMic) { v -> store.edit { it.copy(applyMic = v) } }
-        bindSwitch(c.swContinueAfterMic, s.continueAfterMic) { v ->
-            store.edit { it.copy(continueAfterMic = v) }
-        }
-        bindSwitch(c.swIntervalRest, s.intervalRest) { v -> store.edit { it.copy(intervalRest = v) } }
+        // 三个开关（空闲互动 / 申请连麦 / 下麦继续）**尚未接入流程**，布局里已
+        // `enabled=false`，这里刻意不绑监听：绑了反而是「能改设置但没人消费」的假象。
+        // 接流程时再打开，见 Settings 里那段注释。
+        bindIntervalRest(c, s)
+    }
 
-        bindIntField(c.etRestAfterN, s.restAfterN) { v -> store.edit { it.copy(restAfterN = v) } }
-        bindIntField(c.etRestSeconds, s.restSeconds) { v -> store.edit { it.copy(restSeconds = v) } }
+    /**
+     * 定时休息：开关控制两个输入框是否可用（关掉只置灰，**不清空用户填的数**）。
+     *
+     * 顺带把两个输入框从无约束的 [bindIntField] 换成 [bindRangedIntField]：
+     * 原来填 0 或负数会让 `restAfterN` 参与取模、`restSeconds` 变成"休息 0 秒"，
+     * 实际效果是休息被静默跳过，日志里看不出问题。
+     */
+    private fun bindIntervalRest(c: ContentAutoFollowBinding, s: Settings) {
+        bindRangedIntField(c.etRestAfterN, s.restAfterN, REST_AFTER_N_MIN, REST_AFTER_N_MAX) { v ->
+            store.edit { it.copy(restAfterN = v) }
+        }
+        bindRangedIntField(c.etRestSeconds, s.restSeconds, REST_SECONDS_MIN, REST_SECONDS_MAX) { v ->
+            store.edit { it.copy(restSeconds = v) }
+        }
+        renderIntervalRestEnabled(c, s.intervalRest)
+        bindSwitch(c.swIntervalRest, s.intervalRest) { v ->
+            store.edit { it.copy(intervalRest = v) }
+            renderIntervalRestEnabled(c, v)
+        }
+    }
+
+    private fun renderIntervalRestEnabled(c: ContentAutoFollowBinding, enabled: Boolean) {
+        listOf(c.etRestAfterN, c.etRestSeconds).forEach {
+            it.isEnabled = enabled
+            it.alpha = if (enabled) 1f else 0.4f
+        }
     }
 
     private fun bindNurture(s: Settings) {
@@ -832,27 +847,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderLicense(status: LicenseStatus) {
-        val c = binding.contentAuto
-
-        c.tvLicenseStatus.text = when {
-            !status.authorized -> status.message ?: "未授权"
-            status.offline -> "已授权（离线模式）"
-            status.source == "LOCAL_PLACEHOLDER" -> "已授权（本地占位）"
-            else -> "已授权"
-        }
-        c.tvLicenseStatus.setTextColor(
-            ContextCompat.getColor(this, if (status.authorized) R.color.success_green else R.color.brand_red)
-        )
-        c.tvLicenseStatus.setTypeface(null, Typeface.BOLD)
-        c.tvLicenseStatus.setOnClickListener {
-            if (!license.state.value.authorized) showActivationDialog()
-        }
-
-        c.tvLicenseExpire.text = status.expireAt?.let { millis ->
-            val days = status.remainingDays
-            if (days != null) "${formatDateTime(millis)}（剩余 $days 天）" else formatDateTime(millis)
-        } ?: "—"
-        c.tvLicenseCode.text = status.code?.let { maskCode(it) } ?: "—"
+        // vc49：页内的「授权信息」卡已整卡删除，状态与天数只走顶栏徽标（[renderLicenseBadge]），
+        // 这里只保留与界面无关的两件事：离线转换的日志去重、开始按钮的可用性。
+        // 到期具体时间与密钥掩码移到了 [showActivationDialog] 的正文里（点徽标即可看到）。
 
         // 只在这条状态**第一次**出现时记一行。这个函数现在每次回前台、每小时都会跑，
         // 不加去重的话日志会被「授权进入离线模式」刷屏。
@@ -953,15 +950,21 @@ class MainActivity : AppCompatActivity() {
             setPadding(28, 18, 28, 18)
         }
         val current = license.state.value
-        val currentDesc = licenseDaysLeft(current)
-            ?.let { "剩余 $it 天" }
-            ?: "到期时间未知"
+        // 页内授权卡删除后，这个弹窗是**唯一**能看到「到期时间」和「当前密钥」的地方，
+        // 所以正文要把两样都带上：只有「剩余 N 天」不足以让用户核对是哪张授权到期。
+        val currentDesc = buildString {
+            append(licenseDaysLeft(current)?.let { "剩 $it 天" } ?: "到期时间未知")
+            current.expireAt?.let { append("，到期 ").append(formatDateTime(it)) }
+        }
+        val currentCode = current.code?.let { maskCode(it) }
         val dialog = AlertDialog.Builder(this)
             .setTitle(if (replacing) "更换授权密钥" else "激活授权")
             .setMessage(
                 PromptText.of(
                     if (replacing) {
-                        "当前已授权（$currentDesc）。输入新密钥会**覆盖**本机授权，激活后本设备绑定到新授权。"
+                        "当前已授权（$currentDesc）" +
+                            (currentCode?.let { "，密钥 $it" } ?: "") +
+                            "。输入新密钥会**覆盖**本机授权，激活后本设备绑定到新授权。"
                     } else {
                         "输入管理员提供的授权密钥。激活后本设备会绑定到该授权。"
                     }
@@ -1334,7 +1337,7 @@ class MainActivity : AppCompatActivity() {
             "开始关注",
             "· **请先手动进入目标直播间，停在直播画面上**\n" +
                 "· 目标 **${s.followTarget}** 人 · 今日上限 **${s.dailyLimit}** · " +
-                "每次间隔约 **${s.scanIntervalLabel}**（±${s.jitterPercent}% 抖动）\n" +
+                "每次间隔约 **${s.scanIntervalLabel}**（随机浮动）\n" +
                 "· 只做关注：不私信、不点赞、不刷评论，也不会自己找直播间\n" +
                 "· 随时可用悬浮窗或通知栏停止"
         ) { startFlow(FollowFromLiveFlow(), "已启动直播关注") }
@@ -1534,7 +1537,7 @@ class MainActivity : AppCompatActivity() {
             val snapshot = withContext(Dispatchers.Default) {
                 runCatching {
                     val config = LocatorConfigLoader.load(this@MainActivity)
-                    val actions = Actions(service, Humanizer(store.current.jitterPercent))
+                    val actions = Actions(service, Humanizer(Settings.HUMANIZE_JITTER))
                     val detection = PageDetector(config, actions).detect()
                     Triple(detection, service.rootInActiveWindow?.packageName?.toString(), config.pages.size)
                 }
@@ -1596,6 +1599,19 @@ class MainActivity : AppCompatActivity() {
          * 2.5 秒足够系统绑完，也短到用户还在界面上、看到提示不会莫名其妙。
          */
         private const val PERMISSION_WARN_GRACE_MS = 2_500L
+
+        /**
+         * 定时休息两个数字框的合法范围。
+         *
+         * 下界不取 0：`FollowFromLiveFlow` 的判据是
+         * `intervalRest && restAfterN > 0 && followed % restAfterN == 0`，
+         * 填 0 时那个 `> 0` 直接把整个休息分支短路掉 —— 开关明明开着却永不休息，
+         * 日志里也看不出来。`restSeconds = 0` 同理，等于"休息 0 秒"。
+         */
+        private const val REST_AFTER_N_MIN = 1
+        private const val REST_AFTER_N_MAX = 500
+        private const val REST_SECONDS_MIN = 5
+        private const val REST_SECONDS_MAX = 600
 
         private val TAB_NAMES = listOf("自动关注", "养号助手", "直播互动")
 

@@ -8,8 +8,6 @@ package com.doujiajia.app.data
  */
 data class Settings(
     // ===== 自动关注 · 参数设置 =====
-    /** 订阅模式：0=手动校准 1=自动校准 */
-    val calMode: Int = 1,
     /** 目标关注数量 */
     val followTarget: Int = 200,
     /**
@@ -23,8 +21,13 @@ data class Settings(
     val scanIntervalUnit: Int = UNIT_SECOND,
     /** 每日关注上限，达到即停 */
     val dailyLimit: Int = 200,
-    /** 延迟抖动幅度（%），对扫描间隔与休息时长生效 */
-    val jitterPercent: Int = 30,
+    /**
+     * 以下三个开关**尚未接入任何流程**（引擎里零引用，界面上已置灰并标「暂未生效」）。
+     *
+     * 字段与 SP key 刻意保留：接流程时只要去掉 `content_auto_follow.xml` 里的
+     * `android:enabled="false"` 与「暂未生效」注记，再把消费方写进对应 Flow 即可，
+     * 不涉及存储迁移。改之前先 grep 一次，别把它们当成"已经生效"来用。
+     */
     val idleLive: Boolean = false,
     val applyMic: Boolean = false,
     val continueAfterMic: Boolean = false,
@@ -92,6 +95,15 @@ data class Settings(
         /** 单位 */
         const val UNIT_SECOND = 0
         const val UNIT_MINUTE = 1
+
+        /**
+         * 拟人化延迟抖动幅度（%），**固定不可配**。
+         *
+         * vc49 起界面上的「延迟抖动（%）」已删除：用户不需要调它，而抖动本身是降封号的
+         * 硬验收项（计划 §3.1/§3.2，所有延迟/落点/滑段/输入节奏都必须随机），不能因为
+         * 删了配置项就退化成固定值。这里取的就是删除前的默认值 30%，行为与 vc48 一致。
+         */
+        const val HUMANIZE_JITTER = 30
 
         /** 停留节奏 */
         const val PACE_SLOW = 0

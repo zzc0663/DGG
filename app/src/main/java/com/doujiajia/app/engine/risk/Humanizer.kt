@@ -8,7 +8,11 @@ import kotlin.random.Random
  * 拟人化：给所有机械动作加上不可预测性（计划 §3.1 §3.2）。
  *
  * 原则：**不使用固定值**。延迟、点击落点、滑动段数、输入节奏全部取区间随机，
- * 且区间本身以配置的「延迟抖动（%）」为幅度。这不是美观问题，是封号概率问题。
+ * 且区间本身以 [jitterPercent] 为幅度。这不是美观问题，是封号概率问题。
+ *
+ * ⚠️ 幅度自 vc49 起**不再由用户配置**（界面上那个「延迟抖动（%）」已删除），
+ * 调用方一律传 [com.doujiajia.app.data.Settings.HUMANIZE_JITTER] = 30。
+ * 只有调试通道为了精确点击才传 0（[DebugChannel]）。
  */
 class Humanizer(private val jitterPercent: Int) {
 

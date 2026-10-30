@@ -1,6 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  自动关注 · 参数区（vc49 起为「一页放下」布局）
+
+  设计约束（真机 360×791dp，可视内容区 589dp）：
+  - 三个核心参数（目标 / 每日上限 / 扫描间隔）压成**一行三列**，每列 96dp；
+    「目标关注数量」「每日关注上限」6 字 12sp = 72dp，「10000」14sp ≈ 64dp，都放得下。
+  - 不再有「校准模式」「延迟抖动」：前者是死参数，后者改为固定 ±30% 内建。
+  - 定时休息压成内联一行，用 InputMini（52×32）。
+  - 三个开关目前**未接入任何流程**（引擎里零引用），置灰 + 标「暂未生效」，
+    以后接流程只需把 isEnabled 改 true 并删掉注记。
+  - 授权信息卡整卡删除，入口在顶栏 tv_license_badge（含到期日期）。
+-->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/page_bg"
@@ -24,112 +35,13 @@
 
         <!-- ==================== 参数设置 ==================== -->
         <LinearLayout
-            style="@style/CardBox"
-            android:layout_marginBottom="10dp">
+            style="@style/CardBox">
 
             <TextView
                 style="@style/TxtSection"
                 android:text="参数设置" />
 
-            <TextView
-                style="@style/TxtFieldLabel"
-                android:layout_marginTop="14dp"
-                android:text="校准模式" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:background="@drawable/bg_segment_group"
-                android:orientation="horizontal"
-                android:padding="3dp">
-
-                <TextView
-                    android:id="@+id/seg_manual_cal"
-                    style="@style/SegItem"
-                    android:text="手动校准" />
-
-                <TextView
-                    android:id="@+id/seg_auto_cal"
-                    style="@style/SegItemSelected"
-                    android:text="自动校准" />
-            </LinearLayout>
-
-            <!-- 双列输入 -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
-                android:orientation="horizontal">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        style="@style/TxtFieldLabel"
-                        android:text="目标关注数量" />
-
-                    <EditText
-                        android:id="@+id/et_follow_target"
-                        style="@style/InputBox"
-                        android:layout_marginTop="6dp"
-                        android:text="200" />
-
-                    <TextView
-                        style="@style/TxtRowSub"
-                        android:layout_marginTop="4dp"
-                        android:text="范围 1 ~ 10000"
-                        android:textSize="11sp" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        style="@style/TxtFieldLabel"
-                        android:text="扫描间隔" />
-
-                    <EditText
-                        android:id="@+id/et_scan_interval"
-                        style="@style/InputBox"
-                        android:layout_marginTop="6dp"
-                        android:text="30" />
-
-                    <!-- 单位：秒 / 分钟。数值上限随单位变（秒 ≤3600，分钟 ≤60） -->
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="6dp"
-                        android:orientation="horizontal">
-
-                        <TextView
-                            android:id="@+id/seg_interval_sec"
-                            style="@style/SegItem"
-                            android:layout_width="0dp"
-                            android:layout_height="30dp"
-                            android:layout_weight="1"
-                            android:text="秒" />
-
-                        <TextView
-                            android:id="@+id/seg_interval_min"
-                            style="@style/SegItem"
-                            android:layout_width="0dp"
-                            android:layout_height="30dp"
-                            android:layout_marginStart="6dp"
-                            android:layout_weight="1"
-                            android:text="分钟" />
-                    </LinearLayout>
-                </LinearLayout>
-            </LinearLayout>
-
-            <!-- 反风控参数：日上限 + 延迟抖动 -->
+            <!-- 三列核心参数 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -144,67 +56,211 @@
 
                     <TextView
                         style="@style/TxtFieldLabel"
+                        android:maxLines="1"
+                        android:text="目标关注数量" />
+
+                    <EditText
+                        android:id="@+id/et_follow_target"
+                        style="@style/InputBox"
+                        android:layout_marginTop="6dp"
+                        android:gravity="center"
+                        android:text="200" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        style="@style/TxtFieldLabel"
+                        android:maxLines="1"
                         android:text="每日关注上限" />
 
                     <EditText
                         android:id="@+id/et_daily_limit"
                         style="@style/InputBox"
                         android:layout_marginTop="6dp"
+                        android:gravity="center"
                         android:text="200" />
-
-                    <TextView
-                        style="@style/TxtRowSub"
-                        android:layout_marginTop="4dp"
-                        android:text="范围 1 ~ 10000"
-                        android:textSize="11sp" />
                 </LinearLayout>
 
                 <LinearLayout
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
+                    android:layout_marginStart="8dp"
                     android:layout_weight="1"
                     android:orientation="vertical">
 
                     <TextView
                         style="@style/TxtFieldLabel"
-                        android:text="延迟抖动（%）" />
+                        android:maxLines="1"
+                        android:text="扫描间隔" />
 
                     <EditText
-                        android:id="@+id/et_jitter"
+                        android:id="@+id/et_scan_interval"
                         style="@style/InputBox"
                         android:layout_marginTop="6dp"
+                        android:gravity="center"
                         android:text="30" />
+
+                    <!-- 单位：秒 / 分钟。数值上限随单位变（秒 ≤3600，分钟 ≤60） -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:id="@+id/seg_interval_sec"
+                            style="@style/SegMini"
+                            android:text="秒" />
+
+                        <TextView
+                            android:id="@+id/seg_interval_min"
+                            style="@style/SegMini"
+                            android:layout_marginStart="6dp"
+                            android:text="分钟" />
+                    </LinearLayout>
                 </LinearLayout>
             </LinearLayout>
 
-            <!-- 空闲时直播互动 -->
+            <!-- 定时休息：内联一行（关掉开关则两个输入框置灰，但保留已填数值） -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="18dp"
+                android:layout_marginTop="14dp"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
-                <LinearLayout
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:text="每关注" />
+
+                <EditText
+                    android:id="@+id/et_rest_after_n"
+                    style="@style/InputMini"
+                    android:layout_marginStart="6dp"
+                    android:text="5" />
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:layout_marginStart="6dp"
+                    android:text="个后休息" />
+
+                <EditText
+                    android:id="@+id/et_rest_seconds"
+                    style="@style/InputMini"
+                    android:layout_marginStart="6dp"
+                    android:text="30" />
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:layout_marginStart="6dp"
+                    android:text="秒" />
+
+                <Space
                     android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
 
-                    <TextView
-                        style="@style/TxtRowTitle"
-                        android:text="空闲时直播互动" />
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/sw_interval_rest"
+                    style="@style/AppSwitch"
+                    android:checked="true" />
+            </LinearLayout>
 
-                    <TextView
-                        style="@style/TxtRowSub"
-                        android:layout_marginTop="4dp"
-                        android:text="扫不到新用户时自动评论互动" />
-                </LinearLayout>
+            <!-- 以下三项尚未接入流程：置灰 + 明示「暂未生效」 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtRowTitle"
+                    android:text="空闲时直播互动"
+                    android:textColor="@color/text_secondary" />
+
+                <TextView
+                    style="@style/TxtRowSub"
+                    android:layout_marginStart="6dp"
+                    android:text="暂未生效"
+                    android:textColor="@color/text_tertiary" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
 
                 <com.google.android.material.switchmaterial.SwitchMaterial
                     android:id="@+id/sw_idle_live"
-                    style="@style/AppSwitch" />
+                    style="@style/AppSwitch"
+                    android:alpha="0.5"
+                    android:enabled="false" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtRowTitle"
+                    android:text="自动申请连麦"
+                    android:textColor="@color/text_secondary" />
+
+                <TextView
+                    style="@style/TxtRowSub"
+                    android:layout_marginStart="6dp"
+                    android:text="暂未生效"
+                    android:textColor="@color/text_tertiary" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/sw_apply_mic"
+                    style="@style/AppSwitch"
+                    android:alpha="0.5"
+                    android:enabled="false" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtRowTitle"
+                    android:text="下麦后继续干活"
+                    android:textColor="@color/text_secondary" />
+
+                <TextView
+                    style="@style/TxtRowSub"
+                    android:layout_marginStart="6dp"
+                    android:text="暂未生效"
+                    android:textColor="@color/text_tertiary" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/sw_continue_after_mic"
+                    style="@style/AppSwitch"
+                    android:alpha="0.5"
+                    android:enabled="false" />
             </LinearLayout>
 
             <!-- 配置引导条 -->
@@ -216,9 +272,9 @@
                 android:gravity="center_vertical"
                 android:orientation="horizontal"
                 android:paddingStart="10dp"
-                android:paddingTop="9dp"
+                android:paddingTop="8dp"
                 android:paddingEnd="10dp"
-                android:paddingBottom="9dp">
+                android:paddingBottom="8dp">
 
                 <TextView
                     android:layout_width="wrap_content"
@@ -244,214 +300,6 @@
                     android:text="去配置 ›"
                     android:textColor="@color/warning_amber"
                     android:textSize="12sp" />
-            </LinearLayout>
-
-            <!-- 自动申请连麦 -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        style="@style/TxtRowTitle"
-                        android:text="自动申请连麦" />
-
-                    <TextView
-                        style="@style/TxtRowSub"
-                        android:layout_marginTop="4dp"
-                        android:text="启动后自动点击申请连麦按钮" />
-                </LinearLayout>
-
-                <com.google.android.material.switchmaterial.SwitchMaterial
-                    android:id="@+id/sw_apply_mic"
-                    style="@style/AppSwitch" />
-            </LinearLayout>
-
-            <!-- 下麦后继续干活 -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        style="@style/TxtRowTitle"
-                        android:text="下麦后继续干活" />
-
-                    <TextView
-                        style="@style/TxtRowSub"
-                        android:layout_marginTop="4dp"
-                        android:text="关注数未达标下麦后自动恢复关注" />
-                </LinearLayout>
-
-                <com.google.android.material.switchmaterial.SwitchMaterial
-                    android:id="@+id/sw_continue_after_mic"
-                    style="@style/AppSwitch" />
-            </LinearLayout>
-
-            <!-- 定时关注间隔 -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView
-                    style="@style/TxtRowTitle"
-                    android:layout_width="0dp"
-                    android:layout_weight="1"
-                    android:text="定时关注间隔" />
-
-                <com.google.android.material.switchmaterial.SwitchMaterial
-                    android:id="@+id/sw_interval_rest"
-                    style="@style/AppSwitch"
-                    android:checked="true" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:orientation="horizontal">
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        style="@style/TxtFieldLabel"
-                        android:text="每关注N个后休息" />
-
-                    <EditText
-                        android:id="@+id/et_rest_after_n"
-                        style="@style/InputBox"
-                        android:layout_marginTop="6dp"
-                        android:text="5" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        style="@style/TxtFieldLabel"
-                        android:text="休息秒数" />
-
-                    <EditText
-                        android:id="@+id/et_rest_seconds"
-                        style="@style/InputBox"
-                        android:layout_marginTop="6dp"
-                        android:text="30" />
-                </LinearLayout>
-            </LinearLayout>
-        </LinearLayout>
-
-        <!-- ==================== 授权信息 ==================== -->
-        <LinearLayout
-            style="@style/CardBox"
-            android:layout_marginBottom="10dp">
-
-            <TextView
-                style="@style/TxtSection"
-                android:text="授权信息" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView
-                    style="@style/TxtValue"
-                    android:layout_width="78dp"
-                    android:text="授权状态"
-                    android:textColor="@color/text_secondary" />
-
-                <TextView
-                    android:id="@+id/tv_license_status"
-                    style="@style/TxtValue"
-                    android:text="检测中…" />
-            </LinearLayout>
-
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:layout_marginTop="11dp"
-                android:background="@color/divider" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="11dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView
-                    style="@style/TxtValue"
-                    android:layout_width="78dp"
-                    android:text="到期时间"
-                    android:textColor="@color/text_secondary" />
-
-                <TextView
-                    android:id="@+id/tv_license_expire"
-                    style="@style/TxtValue"
-                    android:text="—" />
-            </LinearLayout>
-
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:layout_marginTop="11dp"
-                android:background="@color/divider" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="11dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView
-                    style="@style/TxtValue"
-                    android:layout_width="78dp"
-                    android:text="授权密钥"
-                    android:textColor="@color/text_secondary" />
-
-                <TextView
-                    android:id="@+id/tv_license_code"
-                    style="@style/TxtValue"
-                    android:layout_width="0dp"
-                    android:layout_weight="1"
-                    android:text="—"
-                    android:textColor="@color/text_tertiary" />
-
-                <ImageView
-                    android:layout_width="18dp"
-                    android:layout_height="18dp"
-                    android:contentDescription="密钥"
-                    android:src="@drawable/ic_lock" />
             </LinearLayout>
         </LinearLayout>
 

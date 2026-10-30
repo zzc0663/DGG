@@ -10,7 +10,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
 import com.doujiajia.app.data.LogStore
-import com.doujiajia.app.data.SettingsStore
+import com.doujiajia.app.data.Settings
 import com.doujiajia.app.engine.Actions
 import com.doujiajia.app.engine.LocatorConfigLoader
 import com.doujiajia.app.engine.PageDetector
@@ -121,10 +121,7 @@ object DebugChannel {
                     return
                 }
                 val config = LocatorConfigLoader.load(service, forceReload = true)
-                val actions = Actions(
-                    service,
-                    Humanizer(SettingsStore.get(service).current.jitterPercent)
-                )
+                val actions = Actions(service, Humanizer(Settings.HUMANIZE_JITTER))
                 val d = PageDetector(config, actions).detect()
                 File(dumpDir, "page.txt").writeText(
                     buildString {

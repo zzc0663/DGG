@@ -2,6 +2,7 @@ package com.doujiajia.app.engine
 
 import android.content.Context
 import com.doujiajia.app.data.LogStore
+import com.doujiajia.app.data.Settings
 import com.doujiajia.app.data.SettingsStore
 import com.doujiajia.app.data.license.LicenseGate
 import com.doujiajia.app.engine.risk.AnomalyGuard
@@ -91,7 +92,8 @@ object TaskEngine {
 
         val appContext = context.applicationContext
         val settings = SettingsStore.get(appContext).current
-        val humanizer = Humanizer(settings.jitterPercent)
+        // 抖动幅度自 vc49 起固定（界面上那个「延迟抖动（%）」已删除），见 Settings.HUMANIZE_JITTER
+        val humanizer = Humanizer(Settings.HUMANIZE_JITTER)
         val actions = Actions(service, humanizer)
         val config = LocatorConfigLoader.load(appContext)
         val detector = PageDetector(config, actions)
@@ -124,7 +126,7 @@ object TaskEngine {
         LogStore.i(
             TAG,
             "启动流程「${flow.name}」：目标 ${settings.followTarget}，每日上限 ${settings.dailyLimit}，" +
-                "抖动 ±${settings.jitterPercent}%，扫描间隔 ${settings.scanIntervalLabel}"
+                "抖动 ±${Settings.HUMANIZE_JITTER}%，扫描间隔 ${settings.scanIntervalLabel}"
         )
 
         job = scope.launch {
