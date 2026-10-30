@@ -100,6 +100,17 @@ class MainActivity : AppCompatActivity() {
     private var lastPromptedVersion = 0
     private var lastOtaCheck = 0L
 
+    /**
+     * 本次进程内是否已经自动弹过激活框（用户 2026-10-31：冷启动只弹一次）。
+     *
+     * 从系统设置页返回会触发 `refreshIfStale` → 状态重新变「未激活」，
+     * 旧写法每次都弹。顶栏徽标已经常显状态且可点，取消过一次就够表态了。
+     */
+    private var activationPrompted = false
+
+    /** 「授权进入离线模式」只记一次日志（renderLicense 现在会随回前台/每小时重跑） */
+    private var offlineNoticeLogged = false
+
     /** 权限恢复向导的待办队列（无障碍 → 悬浮窗 → 通知），空表示当前没有流程在跑 */
     private val pendingRestore = ArrayDeque<PermissionGuard.Kind>()
 
@@ -155,6 +166,9 @@ class MainActivity : AppCompatActivity() {
 
         store = SettingsStore.get(this)
         license = RemoteLicenseProvider(this)
+        // 只有**进程级冷启动**才自动弹激活框；转屏/系统回收后重建（savedInstanceState 非空）不再弹，
+        // 否则用户在输入框里打字时转一下屏，对话框就重来一次（见 activationPrompted 的注释）
+        activationPrompted = savedInstanceState != null
         // 把授权状态交给服务层门禁：EngineController.start() 直接查它，
         // 悬浮窗「重试」/通知栏入口就无法绕过界面把无效授权的任务重新拉起来
         LicenseGate.attach(license)
@@ -206,6 +220,11 @@ class MainActivity : AppCompatActivity() {
         // 授权复核：只在 onCreate 握手一次的话，App 常驻前台几小时也不会发现授权被停用。
         // 6 小时阈值 + 内部 30 分钟失败节流，正常使用几乎不会产生额外请求。
         uiScope.launch { license.refreshIfStale(AUTHORIZATION_REFRESH_MS) }
+        // 顺手把授权信息按「当前时间」重画一次：徽标上的剩余天数是用 expireAt 现算的，
+        // 在后台放一夜回来必须重算，否则显示的还是昨天的天数
+        renderLicense(license.state.value)
+        permissionHandler.removeCallbacks(licenseRefresh)
+        permissionHandler.postDelayed(licenseRefresh, LICENSE_BADGE_REFRESH_MS)
     }
 
     /**
@@ -233,12 +252,15 @@ class MainActivity : AppCompatActivity() {
         AppVisibility.onPause()
         // 后台不再轮询权限：不是前台就没人看这几个点，白耗电
         permissionHandler.removeCallbacks(permissionPoll)
+        // 授权徽标同理：不在前台时没人看，回前台（onResume）会重算
+        permissionHandler.removeCallbacks(licenseRefresh)
     }
 
     override fun onDestroy() {
         progressJob?.cancel()
         progressJob = null
         permissionHandler.removeCallbacks(permissionPoll)
+        permissionHandler.removeCallbacks(licenseRefresh)
         activationDialog?.dismiss()
         updateDialog?.dismiss()
         uiScope.cancel()
@@ -336,6 +358,21 @@ class MainActivity : AppCompatActivity() {
 
     /** 宽限期到了再判断「权限是否真的丢了」，避免把「服务还没绑上」误报成「权限被重置」 */
     private val lossWarnRunnable = Runnable { warnIfPermissionsLost(refreshPermissionState()) }
+
+    /**
+     * 每小时重画一次授权徽标。
+     *
+     * 徽标上的「剩 N 天」是用 `expireAt` 现算的，**不会自己变**：App 常驻前台跑一整夜，
+     * 第二天早上还显示昨天的天数。回前台会重算一次（onResume），但那种「不退出也不切换」的
+     * 挂机场景只能靠定时。一次字符串拼接 + setText，开销可忽略。
+     */
+    private val licenseRefresh = object : Runnable {
+        override fun run() {
+            if (isFinishing || isDestroyed) return
+            renderLicenseBadge(license.state.value)
+            permissionHandler.postDelayed(this, LICENSE_BADGE_REFRESH_MS)
+        }
+    }
 
     /** 上一份渲染过的状态，用来「变了才重画/才打日志」 */
     private var lastPermissionState: AppPermissions.State? = null
@@ -778,9 +815,15 @@ class MainActivity : AppCompatActivity() {
                 renderLicense(status)
                 if (status.authorized) {
                     maybeAutoCheckOta()
-                } else if (status.source == "REMOTE" &&
+                } else if (!activationPrompted && status.source == "REMOTE" &&
                     status.message?.startsWith("未激活") == true
                 ) {
+                    // **冷启动只自动弹一次**。
+                    //
+                    // 顶栏的授权徽标已经常显状态且可点，重复弹只会打断用户：
+                    // 从系统设置页返回会触发 `refreshIfStale` → 状态重新变「未激活」，
+                    // 旧写法的每一次都会再弹一次。取消过就等于表态，之后由用户自己点。
+                    activationPrompted = true
                     showActivationDialog()
                 }
             }
@@ -811,14 +854,93 @@ class MainActivity : AppCompatActivity() {
         } ?: "—"
         c.tvLicenseCode.text = status.code?.let { maskCode(it) } ?: "—"
 
-        if (status.offline && status.message != null) {
+        // 只在这条状态**第一次**出现时记一行。这个函数现在每次回前台、每小时都会跑，
+        // 不加去重的话日志会被「授权进入离线模式」刷屏。
+        if (status.offline && status.message != null && !offlineNoticeLogged) {
+            offlineNoticeLogged = true
             LogStore.i(TAG, "授权进入离线模式：${status.message}")
+        } else if (!status.offline) {
+            offlineNoticeLogged = false
         }
+
+        renderLicenseBadge(status)
         binding.btnStartService.isEnabled =
             status.authorized || TaskEngine.progress.value.state.isActive
     }
 
-    private fun showActivationDialog() {
+    /**
+     * 顶栏授权徽标。
+     *
+     * 三条口径（用户 2026-10-31 明确）：
+     * - **授权与否常显**；剩余天数**只在这个授权有效时**显示，未授权就只写「未授权」；
+     * - 点它 → 输入授权密钥（已授权时是「更换」，正文会写明覆盖本机授权）；
+     * - 离线宽限期用琥珀色 + 「离线」，提醒该联网同步，而不是让用户以为授权坏了。
+     *
+     * 天数的算法见 [licenseDaysLeft] —— **必须用 expireAt 本地算**，不能用服务端下发的
+     * `remainingDays`：那是握手那一刻的快照，断网一周它还停在 365。
+     */
+    private fun renderLicenseBadge(status: LicenseStatus) {
+        val days = licenseDaysLeft(status)
+        val text: String
+        val colorRes: Int
+        when {
+            !status.authorized -> {
+                text = "未授权"
+                colorRes = R.color.brand_red
+            }
+            days != null && days <= 0 -> {
+                text = "已过期"
+                colorRes = R.color.brand_red
+            }
+            status.source == "LOCAL_PLACEHOLDER" -> {
+                text = "已授权（本地）"
+                colorRes = R.color.success_green
+            }
+            days == null -> {
+                // 拿不到到期时间：只报状态，不编造天数
+                text = if (status.offline) "离线" else "已授权"
+                colorRes = if (status.offline) R.color.warning_amber else R.color.success_green
+            }
+            status.offline -> {
+                text = "离线 · 剩 $days 天"
+                colorRes = R.color.warning_amber
+            }
+            else -> {
+                text = "已授权 · 剩 $days 天"
+                colorRes = R.color.success_green
+            }
+        }
+
+        val badge = binding.tvLicenseBadge
+        badge.text = text
+        badge.setTextColor(ContextCompat.getColor(this, colorRes))
+        badge.setTypeface(null, Typeface.BOLD)
+        // 读屏 / 色弱用户靠这句拿到状态；也是我给真机做断言用的抓手（dump 里 grep content-desc）
+        badge.contentDescription = "授权状态：$text，点击输入授权密钥"
+        badge.setOnClickListener {
+            showActivationDialog(replacing = license.state.value.authorized)
+        }
+    }
+
+    /**
+     * 距到期还有多少天（向上取整：距到期 23 小时算「剩 1 天」，不是「剩 0 天」）。
+     *
+     * 优先用 `expireAt`（绝对时间戳，与是否联网无关）；只有它缺失时才退回服务端的
+     * `remainingDays` 快照。返回 null = 真的不知道。
+     */
+    private fun licenseDaysLeft(status: LicenseStatus): Long? {
+        val expireAt = status.expireAt ?: return status.remainingDays
+        val ms = expireAt - System.currentTimeMillis()
+        return kotlin.math.ceil(ms / 86_400_000.0).toLong()
+    }
+
+    /**
+     * 输入授权密钥。
+     *
+     * [replacing] = 当前**已授权**，这次是换发/换绑：标题与正文都要说清「会覆盖本机授权」，
+     * 正按钮写「更换」而不是「激活」——否则用户会以为自己只是补一次激活。
+     */
+    private fun showActivationDialog(replacing: Boolean = false) {
         if (isFinishing || activationDialog?.isShowing == true) return
         val input = EditText(this).apply {
             // 服务端 KEY_LENGTH=11、纯数字（crypto.randomInt(10)，**首位可能是 0**）。
@@ -830,11 +952,23 @@ class MainActivity : AppCompatActivity() {
             setSingleLine(true)
             setPadding(28, 18, 28, 18)
         }
+        val current = license.state.value
+        val currentDesc = licenseDaysLeft(current)
+            ?.let { "剩余 $it 天" }
+            ?: "到期时间未知"
         val dialog = AlertDialog.Builder(this)
-            .setTitle("激活授权")
-            .setMessage("输入管理员提供的授权密钥。激活后本设备会绑定到该授权。")
+            .setTitle(if (replacing) "更换授权密钥" else "激活授权")
+            .setMessage(
+                PromptText.of(
+                    if (replacing) {
+                        "当前已授权（$currentDesc）。输入新密钥会**覆盖**本机授权，激活后本设备绑定到新授权。"
+                    } else {
+                        "输入管理员提供的授权密钥。激活后本设备会绑定到该授权。"
+                    }
+                )
+            )
             .setView(input)
-            .setPositiveButton("激活", null)
+            .setPositiveButton(if (replacing) "更换" else "激活", null)
             .setNegativeButton("稍后", null)
             .create()
         dialog.setOnShowListener {
@@ -1148,7 +1282,9 @@ class MainActivity : AppCompatActivity() {
             // 手动暂停与自愈暂停（等待恢复）共用同一颗按钮
             EngineState.PAUSED, EngineState.PAUSED_WAIT -> "继续"
             EngineState.ERROR -> "重试"
-            else -> "开始服务"
+            // 未授权时按钮是禁用的，文案要自己说明为什么点不动——
+            // 灰按钮不给理由，用户只会以为 APP 坏了
+            else -> if (license.state.value.authorized) "开始服务" else "请先激活授权"
         }
         binding.btnStartService.isEnabled = license.state.value.authorized || active
     }
@@ -1448,6 +1584,9 @@ class MainActivity : AppCompatActivity() {
          * 一次判断只读两个 Secure 值 + 一个实例引用，耗时可忽略。
          */
         private const val PERMISSION_POLL_MS = 2_000L
+
+        /** 授权徽标「剩 N 天」的重算间隔（天数只按天变，一小时一次足够） */
+        private const val LICENSE_BADGE_REFRESH_MS = 3_600_000L
 
         /**
          * 「权限被重置」提醒的宽限期。

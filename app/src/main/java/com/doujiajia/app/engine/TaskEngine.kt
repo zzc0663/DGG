@@ -3,6 +3,7 @@ package com.doujiajia.app.engine
 import android.content.Context
 import com.doujiajia.app.data.LogStore
 import com.doujiajia.app.data.SettingsStore
+import com.doujiajia.app.data.license.LicenseGate
 import com.doujiajia.app.engine.risk.AnomalyGuard
 import com.doujiajia.app.engine.risk.Humanizer
 import com.doujiajia.app.service.DggAccessibilityService
@@ -68,6 +69,17 @@ object TaskEngine {
     fun start(context: Context, flow: Flow) {
         if (job?.isActive == true) {
             LogStore.w(TAG, "任务已在运行，忽略重复启动")
+            return
+        }
+        // 第二道授权门（第一道在 `EngineController.start`）。
+        //
+        // 这里才是真正开协程的地方：将来若有人新增调用点（或写调试脚本）直接调它，
+        // 「没授权不许跑」就不该靠调用方自觉。用户 2026-10-31 的要求是
+        // **没有授权禁止任何运行**，所以在这个最后关口再挡一次，代价只是两次 volatile 读。
+        if (!LicenseGate.isAuthorized()) {
+            val reason = LicenseGate.reason()
+            LogStore.e(TAG, "拒绝启动：授权无效（$reason）")
+            publish(EngineState.ERROR, "授权无效：$reason")
             return
         }
         val service = DggAccessibilityService.current
