@@ -184,6 +184,9 @@ class MainActivity : AppCompatActivity() {
         FloatWindowService.collapseIfExpanded()
         // 从系统设置页返回后必须重新读一次，否则用户授权了却仍显示未授权
         val state = refreshPermissionState()
+        // 之后在前台期间每 2 秒再对一次（见 permissionPoll 的注释）
+        permissionHandler.removeCallbacks(permissionPoll)
+        permissionHandler.postDelayed(permissionPoll, PERMISSION_POLL_MS)
         // 悬浮面板上也能改「目标关注数量 / 每日上限」，而本界面的输入框只在 onCreate 绑定一次。
         // 不同步的话两个数字会打架：用户从抖音回来看到旧值，点一下再失焦，
         // bindRangedIntField 的失焦回调还会把旧值写回去，把刚才在面板上设的值覆盖掉。
@@ -195,8 +198,11 @@ class MainActivity : AppCompatActivity() {
             advanceRestore(skipCurrent = true)
             return
         }
-        // 权限被升级/重装/系统清理重置时，主动喊一声——这几个权限没了应用是静默残废的
-        warnIfPermissionsLost(state)
+        // 权限被升级/重装/系统清理重置时，主动喊一声——这几个权限没了应用是静默残废的。
+        // **不能立刻喊**：无障碍的判据现在包含「服务是否真的连上」，而进程刚起来时系统还没把
+        // 服务绑上（通常 1 秒内），立刻判会误报「权限被重置了」。给 2.5 秒宽限，到点再复查一次。
+        permissionHandler.removeCallbacks(lossWarnRunnable)
+        permissionHandler.postDelayed(lossWarnRunnable, PERMISSION_WARN_GRACE_MS)
         // 授权复核：只在 onCreate 握手一次的话，App 常驻前台几小时也不会发现授权被停用。
         // 6 小时阈值 + 内部 30 分钟失败节流，正常使用几乎不会产生额外请求。
         uiScope.launch { license.refreshIfStale(AUTHORIZATION_REFRESH_MS) }
@@ -225,11 +231,14 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
         // 只有确认「界面不在前台」之后，终态面板才允许自动展开（见 FloatWindowService.observe）
         AppVisibility.onPause()
+        // 后台不再轮询权限：不是前台就没人看这几个点，白耗电
+        permissionHandler.removeCallbacks(permissionPoll)
     }
 
     override fun onDestroy() {
         progressJob?.cancel()
         progressJob = null
+        permissionHandler.removeCallbacks(permissionPoll)
         activationDialog?.dismiss()
         updateDialog?.dismiss()
         uiScope.cancel()
@@ -285,21 +294,51 @@ class MainActivity : AppCompatActivity() {
 
     private fun refreshPermissionState(): AppPermissions.State {
         val state = AppPermissions.state(this)
-        listOf(
-            binding.contentAuto.permCard,
-            binding.contentNurture.permCard,
-            binding.contentLive.permCard
-        ).forEach { it.render(state) }
+        // 只有真的变了才重画 + 打日志：这个方法现在每 2 秒被轮询调一次（见 permissionPoll），
+        // 无条件打日志会把日志文件刷满，无条件重画也会和用户点按抢主线程。
+        if (state != lastPermissionState) {
+            lastPermissionState = state
+            listOf(
+                binding.contentAuto.permCard,
+                binding.contentNurture.permCard,
+                binding.contentLive.permCard
+            ).forEach { it.render(state) }
+            LogStore.d(
+                TAG,
+                "权限状态：无障碍=${state.accessibility} 悬浮窗=${state.overlay} " +
+                    "通知=${state.notification} 电池优化忽略=${state.batteryUnrestricted}"
+            )
+        }
         // 记住「曾经授予过」，升级/重装后丢权时才有依据提醒（见 PermissionGuard）
         PermissionGuard.remember(this, state)
-
-        LogStore.d(
-            TAG,
-            "权限状态：无障碍=${state.accessibility} 悬浮窗=${state.overlay} " +
-                "通知=${state.notification} 电池优化忽略=${state.batteryUnrestricted}"
-        )
         return state
     }
+
+    /**
+     * 前台期间每 2 秒重读一次权限状态。
+     *
+     * 为什么不能只在 `onResume` 读：
+     * - 无障碍的判据里有「服务是否真的连上」（见 [AppPermissions.isAccessibilityServiceEnabled]），
+     *   而系统把服务重新绑上、或把服务悄悄解绑，都**不会**触发本界面的任何回调；
+     * - 用户从设置页回来时，系统写 Secure 表与 Activity resume 谁先谁后没有保证，
+     *   resume 那一刻读到的可能还是旧值。
+     * 两个 Secure 读 + 一个实例判断，成本是毫秒级，比「显示错了让用户去点开始才发现」划算得多。
+     */
+    private val permissionPoll = object : Runnable {
+        override fun run() {
+            if (isFinishing || isDestroyed) return
+            refreshPermissionState()
+            permissionHandler.postDelayed(this, PERMISSION_POLL_MS)
+        }
+    }
+
+    private val permissionHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** 宽限期到了再判断「权限是否真的丢了」，避免把「服务还没绑上」误报成「权限被重置」 */
+    private val lossWarnRunnable = Runnable { warnIfPermissionsLost(refreshPermissionState()) }
+
+    /** 上一份渲染过的状态，用来「变了才重画/才打日志」 */
+    private var lastPermissionState: AppPermissions.State? = null
 
     /**
      * 权限丢失提醒 + 逐项恢复向导。
@@ -1401,6 +1440,23 @@ class MainActivity : AppCompatActivity() {
 
         /** 落盘日志文件名。与 DebugChannel 里的 CMD_FILE/LOG_FILE 同一目录，联调用同一个文件 */
         private const val LOG_FILE_NAME = "runtime.log"
+
+        /**
+         * 前台期间重读权限状态的间隔。
+         *
+         * 2 秒是「用户从设置页切回来、眼睛落在三个点上」的容忍上限；
+         * 一次判断只读两个 Secure 值 + 一个实例引用，耗时可忽略。
+         */
+        private const val PERMISSION_POLL_MS = 2_000L
+
+        /**
+         * 「权限被重置」提醒的宽限期。
+         *
+         * 无障碍服务由系统绑定，进程重启后要一点时间才连上；这段窗口里
+         * `isAccessibilityServiceEnabled()` 是 false，立刻判会**每次冷启动都误报**。
+         * 2.5 秒足够系统绑完，也短到用户还在界面上、看到提示不会莫名其妙。
+         */
+        private const val PERMISSION_WARN_GRACE_MS = 2_500L
 
         private val TAB_NAMES = listOf("自动关注", "养号助手", "直播互动")
 
