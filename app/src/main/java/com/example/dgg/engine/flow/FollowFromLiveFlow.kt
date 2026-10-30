@@ -1148,27 +1148,57 @@ class FollowFromLiveFlow : Flow {
         timeoutMs: Long,
         button: AccessibilityNodeInfo? = null
     ): CardProbe {
-        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        val startAt = SystemClock.uptimeMillis()
+        val deadline = startAt + timeoutMs
+        val quickUntil = startAt + QUICK_PROBE_BUDGET_MS
         var useButton = button != null
-        while (SystemClock.uptimeMillis() < deadline) {
-            if (ctx.stopped()) return CardProbe(CardState.UNKNOWN)
+        var snapshotDone = false
+        var lastLabel: String? = null
 
-            if (useButton) {
+        while (true) {
+            if (ctx.stopped()) return CardProbe(CardState.UNKNOWN)
+            val now = SystemClock.uptimeMillis()
+            // 已经跑过整树判定才允许按超时退出——**绝不能「快速通道没结论 + 到了 6 秒」直接判失败**，
+            // 那会把真的关注成功记成失败（vc36 的回归：人数不增加，见下面的注释）。
+            if (now >= deadline && snapshotDone) return CardProbe(CardState.UNKNOWN)
+
+            if (useButton && now < quickUntil) {
                 val quick = quickProbe(button!!, targets, ctx.config.privateAccountHints)
-                quick.result?.let { return it }
+                quick.result?.let {
+                    LogStore.d(TAG, "关注结果（按钮直读，${SystemClock.uptimeMillis() - startAt}ms）：${it.state}")
+                    return it
+                }
                 if (!quick.nodeAlive) {
                     LogStore.d(TAG, "关注按钮节点已脱离节点树（资料卡被重建），改走整树判定")
                     useButton = false
+                } else if (quick.repurposed) {
+                    // 节点还活着但文案变成既非「关注」也非已知结果的别的东西：
+                    // 说明这颗 AccessibilityNodeInfo 已经被抖音复用到别的控件上了，
+                    // 再刷新它读一百次也不会有结论。立即改走整树，不要耗到预算用完。
+                    LogStore.d(TAG, "关注按钮节点已被复用（读到的文案是「${quick.label}」），改走整树判定")
+                    useButton = false
+                } else {
+                    // 文案还是「关注」：界面还没刷新完，继续毫秒级轮询
+                    if (quick.label != lastLabel) {
+                        lastLabel = quick.label
+                        LogStore.d(TAG, "等关注结果：按钮文案仍为「${quick.label}」")
+                    }
+                    delay(CARD_POLL_MS)
+                    continue
                 }
-                // 按钮还活着、文案还没变：只是界面还没刷新，继续毫秒级轮询，别去跑全树
-                delay(CARD_POLL_MS)
-                continue
             }
 
+            // ===== 整树判定 =====
+            // vc36 的回归就出在这里：老实现「有按钮就永远不跑整树」，而实测抖音点关注后
+            // 那颗按钮常常**不在原节点上更新**，于是 6 秒里一次判定都没做，直接判 UNKNOWN
+            // ⇒ 关注明明成功、进度却不涨。现在改成：快速通道有预算，超出预算/节点失效一定转整树，
+            // 而且**只要转进来就至少跑完一趟**（哪怕已经超时）——宁可多花一趟遍历，也不能漏计。
+            useButton = false
             // lean = true：这条路径只用 text/desc/bounds，跳过 id 与 editable 两次跨进程调用
             // （每节点从 7 次降到 5 次，实测省 25%~30%）。页面/浮层/风控判定同样不用 ID，
             // 所以这份快照进缓存后对它们是安全的。
             val facts = ctx.actions.snapshot(ttlMs = 0, lean = true)
+            snapshotDone = true
             val topLimit = cardTopLimit(ctx)
             if (alreadyFollowedIn(facts, targets, topLimit)) {
                 return CardProbe(CardState.ALREADY_FOLLOWED)
@@ -1176,21 +1206,37 @@ class FollowFromLiveFlow : Flow {
             privateEvidenceIn(facts, ctx.config.privateAccountHints, topLimit)?.let { evidence ->
                 return CardProbe(CardState.PRIVATE, evidence = evidence)
             }
+            if (SystemClock.uptimeMillis() >= deadline) return CardProbe(CardState.UNKNOWN)
             delay(CARD_POLL_MS)
         }
-        return CardProbe(CardState.UNKNOWN)
     }
 
-    /** [quickProbe] 的结论：`result` 非空 = 已能定论；`nodeAlive` = 节点是否还能 refresh */
-    private class QuickProbe(val result: CardProbe?, val nodeAlive: Boolean)
+    /**
+     * [quickProbe] 的结论。
+     *
+     * @param result 非空 = 已能定论（成功 / 私密）
+     * @param nodeAlive `refresh()` 是否成功——false 表示节点已脱离节点树
+     * @param label 刷新后读到的文本（日志用）
+     * @param repurposed 节点还活着，但文本既不是「关注」也不是任何已知结果 ⇒ 被复用到别的控件了
+     */
+    private class QuickProbe(
+        val result: CardProbe?,
+        val nodeAlive: Boolean,
+        val label: String? = null,
+        val repurposed: Boolean = false
+    )
 
     /**
      * 毫秒级判据：刷新**那颗被点过的按钮**，只看它自己的文案。
      *
-     * 为什么够用：抖音的资料卡只有一颗主按钮，点「关注」之后它会就地变成
-     * 「取消关注」（成功）/「申请关注」（私密账号），文本就直接挂在**同一个节点**上。
-     * 而 `refresh()` + 读 text/desc 只要 1~3 次跨进程调用，对比整树快照的
-     * 610 节点 × 5 = 3000 次调用，差三个数量级。
+     * 之所以值得试：抖音的资料卡只有一颗主按钮，点「关注」之后多数情况下它会就地变成
+     * 「取消关注」（成功）/「申请关注」（私密账号）。`refresh()` + 读 text/desc 只要
+     * 1~3 次跨进程调用，对比整树快照的 610 节点 × 5 = 3000 次调用，差三个数量级。
+     *
+     * ⚠️ 但它**不能当成唯一判据**（vc36 的教训）：实测这颗按钮常常不是就地更新，
+     * 节点对象被抖音复用后 `refresh()` 依旧返回 true，读到的却是别人的文案。
+     * 所以这里额外给出 [QuickProbe.repurposed]，由调用方据此**立刻**转整树判定，
+     * 而不是抱着一个失效节点空等到超时。
      *
      * 匹配一律**全等**（与 [privateEvidenceIn] 同口径）：包含匹配会让「关注」命中
      * 「申请关注」，把所有成功都判成私密账号。
@@ -1204,21 +1250,27 @@ class FollowFromLiveFlow : Flow {
         if (!alive) return QuickProbe(null, false)
         val text = runCatching { button.text?.toString()?.trim() }.getOrNull()
         val desc = runCatching { button.contentDescription?.toString()?.trim() }.getOrNull()
-        when {
-            // 「已关注」是第三种态（部分版本的资料卡按钮直接写这三个字，不是「取消关注」）。
-            // 只在**按钮自身**的文案上认它，不进全局 ALREADY_FOLLOWED_TEXTS——
-            // 全树判定里放行「已关注」会让「已关注你」这类半句文案被误判成成功。
-            text != null && (ALREADY_FOLLOWED_TEXTS.contains(text) ||
-                text == targets.followed.value || text == FOLLOWED_ALT_TEXT) ->
-                return QuickProbe(CardProbe(CardState.ALREADY_FOLLOWED), true)
 
-            text != null && hints.contains(text) ->
-                return QuickProbe(CardProbe(CardState.PRIVATE, evidence = text), true)
-
-            desc != null && hints.contains(desc) ->
-                return QuickProbe(CardProbe(CardState.PRIVATE, evidence = desc), true)
+        // 已关注：取消关注 / 互相关注 / 配置里的 followed 文案 / 「已关注」
+        // 「已关注」是第三种态（部分版本的资料卡按钮直接写这三个字，不是「取消关注」），
+        // 只在**按钮自身**文案上认它，不进全局 ALREADY_FOLLOWED_TEXTS——
+        // 全树判定里放行「已关注」会让「已关注你」这类半句文案被误判成成功。
+        if (text != null && (ALREADY_FOLLOWED_TEXTS.contains(text) ||
+                text == targets.followed.value || text == FOLLOWED_ALT_TEXT)
+        ) {
+            return QuickProbe(CardProbe(CardState.ALREADY_FOLLOWED), true, text)
         }
-        return QuickProbe(null, true)
+        if (text != null && hints.contains(text)) {
+            return QuickProbe(CardProbe(CardState.PRIVATE, evidence = text), true, text)
+        }
+        if (desc != null && hints.contains(desc)) {
+            return QuickProbe(CardProbe(CardState.PRIVATE, evidence = desc), true, desc)
+        }
+
+        // 文案没变 = 界面还没刷新完（正常等待）；文案变成别的东西 = 节点已被复用（别再等）
+        val unchanged = text == targets.follow.value
+        val repurposed = text != null && !unchanged
+        return QuickProbe(null, true, text, repurposed)
     }
 
     /**
@@ -1569,6 +1621,19 @@ class FollowFromLiveFlow : Flow {
          */
         const val VERIFY_TIMEOUT_MS = 6_000L
         const val CARD_POLL_MS = 250L
+
+        /**
+         * 「直接刷新那颗按钮」这条快速通道的预算，超了必须转整树判定。
+         *
+         * 这个值是 vc36 回归修出来的（2026-10-30，用户报「点击完关注人数不增加」）：
+         * 快速通道只在**按钮就地更新文案**时有效，而实测抖音常常重建资料卡 /
+         * 复用那个节点——此时 `refresh()` 依旧返回 true，却永远读不到「取消关注」。
+         * 老实现「有按钮就永不跑整树」⇒ 6 秒里一次判定都没做 ⇒ 关注成功却记成失败。
+         *
+         * 2000ms 的依据：历史注释记录「按钮状态刷新常常要 1.5~4s」，取偏小的一档，
+         * 让「来得及就地更新」的那些人走毫秒级路径，其余的人最多多花 2 秒回到整树判定。
+         */
+        const val QUICK_PROBE_BUDGET_MS = 2_000L
 
         /** 点「资料卡」后等卡片滑入动画结束，避免拿动画中的 bounds 去点关注 */
         const val CARD_ENTRY_SETTLE_MS = 900L
