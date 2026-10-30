@@ -84,6 +84,14 @@ android {
                 // 安全上也没有退化：v2 存在时系统优先用 v2，v1 只在旧系统解析/兜底时被读。
                 enableV1Signing = true
                 enableV2Signing = true
+                // 再补 v3：**只为让 API 28~32 的 `getPackageArchiveInfo` 能填上 `signingInfo`**。
+                // 2026-10-31（日志 R-20261030-445040）：Android 10 上校验新版包时报
+                // 「读不到下载包的签名（API 29，当前系统用 GET_SIGNING_CERTIFICATES）」——
+                // 已装的 vc41 只有回退前的逻辑，读不到就拒绝，于是永远升不上去。
+                // 客户端那边已经加了「读不到就回退 GET_SIGNATURES」的兜底（vc53），
+                // 这里再签 v3 是为了让**还停在 vc41~vc52 的老设备**也有可能自动升上来。
+                // v3 不改变签名证书（仍是 59927d81…），API < 28 的机器会自动忽略 v3 走 v1。
+                enableV3Signing = true
             }
         }
     }

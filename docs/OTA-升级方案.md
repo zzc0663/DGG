@@ -183,7 +183,7 @@ if (archive.versionCodeOf() <= currentVersionCode) return Rejected("版本号未
 | 主界面顶部（`tv_log` / `tv_unbind` 旁边） | 新增 `tv_update`：「升级」（有新版本时变品牌红 + 小红点） |
 | 点击 | 弹窗：`1.2.0（当前 1.0）`、包大小、更新说明、[立即更新] [稍后] [忽略此版本] |
 | 下载中 | 弹窗内进度条 + 通知栏进度；可关弹窗后台下 |
-| 下载完 | 弹窗变 [立即安装]，跳系统安装器 |
+| 下载完 | **自动弹「更新已下载完成」**，[立即安装] 直接跳系统安装器（vc52 起，见 §6.1） |
 | 忽略此版本 | 记入 `OtaStore.ignoredVersionCode`，该版本不再提示（更高版本仍提示） |
 | 启动 | 静默检查（`Settings.otaAutoCheck` 默认开，6 小时内不重复，失败静默） |
 
@@ -194,6 +194,31 @@ if (archive.versionCodeOf() <= currentVersionCode) return Rejected("版本号未
 
 「未知来源安装」权限（`REQUEST_INSTALL_PACKAGES`）需要单独引导，复用现有 `PermissionCardView`
 的风格，但**不做成常驻权限卡片**——只在用户第一次点安装时弹一次 `Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES`。
+
+### 6.1 下载完成自动弹窗（vc52 落地）
+
+**改之前是什么样**：下载完成只有两件事——顶栏 `tv_update` 变成「安装 x.y.z」、通知栏多一条静默通知。
+而下载这件事多半发生在用户已经切到抖音之后（下载被放到前台服务里就是为了这个），
+回来时没人会去看顶栏那行小字。真机复现：装 vc49 → 检查到新版 → 下载完成 → **界面没有任何弹窗**。
+
+**改之后**：
+
+| 场景 | 行为 |
+|---|---|
+| 界面前台，下载完成 | 自动弹「更新已下载完成」，[立即安装] ← 系统安装器 / [稍后] |
+| 界面在后台，下载完成 | 不弹（会抛 `BadTokenException`），挂 `pendingInstallPrompt`，回前台补弹 |
+| 完成为通知 | 独立通道 `dgg_ota_ready`，**IMPORTANCE_HIGH**（原来的 LOW 通道静默无提示），带 [安装] 按钮 |
+| 点通知 / 点 [安装] | 带 `EXTRA_INSTALL_NOW` 回 `MainActivity`（`singleTop` + `onNewIntent`），直接调起安装器 |
+| 冷启动 `restoreReady` | **不自动弹**，只亮顶栏「安装」，避免每次开 App 都被拦一次 |
+| 任务运行中 | 弹窗只给「知道了」+ 说明「升级会中断自动化」，不给安装按钮 |
+| 未授权「安装应用」 | 弹窗按钮改「去设置」，开启后回来再装 |
+| 「稍后」之后 | 本次进程内不再自动弹（`installPromptedVersion`），顶栏入口仍在 |
+
+⚠️ **通道重要性建好之后改不了**，所以完成通知必须用新通道 id；沿用旧 LOW 通道改了也没用。
+
+⚠️ 自动弹窗只能做到「拉起系统安装器」。ColorOS 那一层（安装信息收集提醒 → 继续安装，
+以及检测到无障碍服务在跑时跳设置页）是 ROM 行为，App 无法绕过——真机实测就是这样，
+所以升级期间用户至少要自己点两次系统按钮。
 
 ---
 

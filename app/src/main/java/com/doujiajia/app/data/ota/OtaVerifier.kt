@@ -56,32 +56,30 @@ object OtaVerifier {
         }
 
         val installed = installedInfo(pm, context.packageName)
-        val mine = installed?.let { signersOf(it) }.orEmpty()
-        val theirs = signersOf(archive)
+        // 两处都要带回退：API 28~32 读**未安装的 APK 文件**时 `signingInfo` 常常是空的
+        // （系统只给已安装应用填），必须再按 GET_SIGNATURES 读一次 v1 签名。
+        // 见 [fetchSigners] 与 2026-10-31 的 R-20261030-445040。
+        val mine = fetchSigners(pm, context.packageName, installed)
+        val theirs = fetchSigners(pm, apk, archive)
         if (mine.isEmpty()) {
             return VerifyResult.Rejected("读不到当前应用的签名，无法校验")
         }
         if (theirs.isEmpty()) {
-            // 这条不是「APK 真的没签名」，而是「本机读不出来」——两者必须区分开，
-            // 否则会像 2026-10-30 那次（日志 R-20261030-50E355）一样查很久：
-            //
-            // API < 28 的设备只能走 `getPackageArchiveInfo(path, GET_SIGNATURES)`，
-            // 而 GET_SIGNATURES 读的是 **v1（JAR）签名**。AGP 在 minSdk >= 24 时默认不签 v1，
-            // 包只有 v2 ⇒ 旧系统上 signatures 恒为 null ⇒ 报「没有签名」，OTA 永远装不上。
-            // 修法是构建时 `enableV1Signing = true`（见 app/build.gradle.kts 的注释）。
+            // 走到这里代表**两种读法都空了**（[fetchSigners] 已经试过
+            // GET_SIGNING_CERTIFICATES 和 GET_SIGNATURES）。历史上的两次误判：
+            // - 2026-10-30 R-20261030-50E355：AGP 在 minSdk >= 24 时默认不签 v1，
+            //   包只有 v2 ⇒ API<28 读 v1 恒为 null ⇒ 修法是 `enableV1Signing = true`；
+            // - 2026-10-31 R-20261030-445040：API 28~32 读**未安装的 APK 文件**不填
+            //   `signingInfo` ⇒ 必须回退到 GET_SIGNATURES（那条回退已加上）。
             val api = Build.VERSION.SDK_INT
             LogStore.e(
                 TAG,
-                "读不到下载包的签名（API $api，当前系统用" +
-                    (if (api >= Build.VERSION_CODES.P) " GET_SIGNING_CERTIFICATES" else " GET_SIGNATURES（只认 v1）") +
-                    "）；包大小 ${apk.length()} 字节"
+                "两种读法都读不到下载包签名（API $api；GET_SIGNING_CERTIFICATES 与 " +
+                    "GET_SIGNATURES 均返回空）；包大小 ${apk.length()} 字节，" +
+                    "可能是包内没有 v1/v2 签名，或文件被截断"
             )
             return VerifyResult.Rejected(
-                if (api >= Build.VERSION_CODES.P) {
-                    "安装包没有签名（本机 API $api 读不到签名信息）"
-                } else {
-                    "安装包没有 v1 签名（本机 API $api 只能读 v1 签名，请使用已签 v1 的包）"
-                }
+                "安装包没有签名（本机 API $api 读不出签名信息），请手动安装最新版本"
             )
         }
         if (!sameSigners(mine, theirs)) {
@@ -117,6 +115,7 @@ object OtaVerifier {
     // | 分界 | API | 影响 |
     // |---|---|---|
     // | 签名集合怎么取 | 28 (P) | `signingInfo` / `GET_SIGNING_CERTIFICATES` 从 28 起才有 |
+    // | **读 APK 文件的签名** | **28~32** | `getPackageArchiveInfo` 读**未安装**的包时**不填 `signingInfo`** ⇒ 必须回退 `GET_SIGNATURES`（2026-10-31 补，见 [fetchSigners]） |
     // | 重载签名怎么传 | 33 (TIRAMISU) | `PackageInfoFlags.of(long)` 从 **33** 起才有 |
     //
     // 2026-10-30 线上事故：两个重载都用 `SDK_INT >= P` 判断，于是在 **Android 9~12L（API 28~32）**
@@ -130,37 +129,80 @@ object OtaVerifier {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             PackageManager.GET_SIGNING_CERTIFICATES
         } else {
-            @Suppress("DEPRECATION")
-            PackageManager.GET_SIGNATURES
+            legacyFlags()
         }
 
-    private fun archiveInfo(pm: PackageManager, apk: File): PackageInfo? = runCatching {
-        val flags = infoFlags()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pm.getPackageArchiveInfo(apk.absolutePath, PackageManager.PackageInfoFlags.of(flags.toLong()))
-        } else {
-            @Suppress("DEPRECATION")
-            pm.getPackageArchiveInfo(apk.absolutePath, flags)
-        }
-    }.onFailure { LogStore.w(TAG, "解析 APK 失败：${it.message}") }.getOrNull()
+    /** v1（JAR）签名专用的 flags。API 28+ 仍可用，是读 APK 文件时唯一可靠的一条路 */
+    @Suppress("DEPRECATION")
+    private fun legacyFlags(): Int = PackageManager.GET_SIGNATURES
 
-    private fun installedInfo(pm: PackageManager, pkg: String): PackageInfo? = runCatching {
-        val flags = infoFlags()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pm.getPackageInfo(pkg, PackageManager.PackageInfoFlags.of(flags.toLong()))
-        } else {
-            @Suppress("DEPRECATION")
-            pm.getPackageInfo(pkg, flags)
+    /**
+     * 读签名集合，**带一次回退**。
+     *
+     * 为什么必须回退（2026-10-31，日志 R-20261030-445040）：
+     * 一台 Android 10（API 29）的设备升 1.4.11 → 最新版，连试 5 轮全是
+     * `读不到下载包的签名（API 29，当前系统用 GET_SIGNING_CERTIFICATES）`。
+     *
+     * `SigningInfo` 虽然是 API 28 引入的，但 **API 28~32 的 `getPackageArchiveInfo` 读的是
+     * 未安装的 APK 文件，不会给它填 `signingInfo`**（只有已安装应用的 `PackageInfo` 才有）。
+     * 结果就是「包明明签了名，本机却读不到」。而包里有 v1 签名（构建时 `enableV1Signing = true`），
+     * 用 `GET_SIGNATURES` 一定读得出来 —— 所以：**先按 API 分支读，空就换 GET_SIGNATURES 再读一次**。
+     *
+     * ⚠️ 这条回退不是"降级安全"：比对的仍然是证书 DER 字节，只是换了条读法。
+     */
+    private fun fetchSigners(pm: PackageManager, target: Any, info: PackageInfo?): List<ByteArray> {
+        val primary = info?.let { signersOf(it) }.orEmpty()
+        if (primary.isNotEmpty()) return primary
+
+        val legacy = runCatching {
+            when (target) {
+                is File -> archiveInfo(pm, target)
+                is String -> installedInfo(pm, target)
+                else -> null
+            }
+        }.getOrNull()
+
+        val fallback = legacy?.let { signersOfV1(it) }.orEmpty()
+        if (fallback.isNotEmpty()) {
+            LogStore.i(
+                TAG,
+                "签名回退成功：GET_SIGNING_CERTIFICATES 为空，改用 GET_SIGNATURES 读到 v1 签名" +
+                    "（API ${Build.VERSION.SDK_INT}，${if (target is File) "下载包" else "已安装应用"}）"
+            )
         }
-    }.onFailure { LogStore.w(TAG, "读取已安装版本失败：${it.message}") }.getOrNull()
+        return fallback
+    }
+
+    private fun archiveInfo(pm: PackageManager, apk: File, flags: Int = infoFlags()): PackageInfo? =
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getPackageArchiveInfo(apk.absolutePath, PackageManager.PackageInfoFlags.of(flags.toLong()))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getPackageArchiveInfo(apk.absolutePath, flags)
+            }
+        }.onFailure { LogStore.w(TAG, "解析 APK 失败：${it.message}") }.getOrNull()
+
+    private fun installedInfo(pm: PackageManager, pkg: String, flags: Int = infoFlags()): PackageInfo? =
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getPackageInfo(pkg, PackageManager.PackageInfoFlags.of(flags.toLong()))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getPackageInfo(pkg, flags)
+            }
+        }.onFailure { LogStore.w(TAG, "读取已安装版本失败：${it.message}") }.getOrNull()
 
     private fun signersOf(info: PackageInfo): List<ByteArray> =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             info.signingInfo?.apkContentsSigners?.map { it.toByteArray() }.orEmpty()
         } else {
-            @Suppress("DEPRECATION")
-            info.signatures?.map { it.toByteArray() }.orEmpty()
+            signersOfV1(info)
         }
+
+    @Suppress("DEPRECATION")
+    private fun signersOfV1(info: PackageInfo): List<ByteArray> =
+        info.signatures?.map { it.toByteArray() }.orEmpty()
 
     /** 集合比对（签名顺序可能不同，但内容必须完全一致） */
     private fun sameSigners(a: List<ByteArray>, b: List<ByteArray>): Boolean {
