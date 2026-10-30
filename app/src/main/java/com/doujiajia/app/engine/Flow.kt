@@ -1,0 +1,220 @@
+package com.doujiajia.app.engine
+
+import android.content.Context
+import android.os.SystemClock
+import com.doujiajia.app.data.Settings
+import com.doujiajia.app.engine.risk.AnomalyGuard
+import com.doujiajia.app.engine.risk.Humanizer
+import kotlinx.coroutines.delay
+
+/**
+ * 业务闭环。
+ *
+ * M1 的引擎只能跑静态步骤列表，表达不了「读到什么决定做什么」。M2 起业务一律实现本接口，
+ * 引擎只负责生命周期、状态发布与风控兜底，具体流程完全交给 Flow。
+ *
+ * 两种异常是约定好的信号，业务层用它们表达「停」的原因：
+ * - [AnomalyStopException] → 引擎置 `STOPPED_ANOMALY`（风控停机，**不重试**）
+ * - [FlowAbortException]   → 引擎置 `ERROR`（做不到，带原因）
+ */
+interface Flow {
+
+    val name: String
+
+    suspend fun run(ctx: FlowContext)
+}
+
+/** 命中风控。引擎捕获后立刻停机，禁止任何形式的重试。 */
+class AnomalyStopException(val hit: AnomalyGuard.Hit) :
+    Exception("命中风控提示 $hit")
+
+/** 流程做不到（定位失效、额度用尽、前置条件不满足），带可读原因。 */
+class FlowAbortException(reason: String) : Exception(reason)
+
+/**
+ * Flow 能用到的一切。
+ *
+ * 刻意不做成「万能上下文」：只有这些能力，业务代码碰不到引擎内部状态，
+ * 也就没法绕过暂停、停止、风控检查。
+ */
+class FlowContext(
+    val appContext: Context,
+    val actions: Actions,
+    val detector: PageDetector,
+    val humanizer: Humanizer,
+    val config: LocatorConfig,
+    val settings: Settings,
+    private val mutate: ((EngineProgress) -> EngineProgress) -> Unit,
+    private val stopFlag: () -> Boolean,
+    private val resumeWaiter: suspend () -> Unit,
+    /** 自愈暂停：把任务挂到 `PAUSED_WAIT`（任务不死，后台继续探测） */
+    private val pauseAuto: (String) -> Unit = {},
+    /** 自愈恢复：探测成功或用户点「继续」后回到 `RUNNING` */
+    private val resumeAuto: () -> Unit = {},
+    /** 当前是否处于暂停。自愈等待循环据此感知「用户已经手动点了继续」 */
+    private val pausedFlag: () -> Boolean = { false }
+) {
+
+    fun publish(
+        stepLabel: String? = null,
+        page: PageState? = null,
+        message: String? = null,
+        followed: Int? = null,
+        target: Int? = null,
+        counterLabel: String? = null,
+        stepIndex: Int? = null,
+        stepTotal: Int? = null,
+        /** 养号专用：点赞/收藏的累计数。传 null 表示不改（其余流程不关心这两个数） */
+        liked: Int? = null,
+        collected: Int? = null
+    ) {
+        mutate { p ->
+            p.copy(
+                stepLabel = stepLabel ?: p.stepLabel,
+                page = page ?: p.page,
+                message = message ?: p.message,
+                followed = followed ?: p.followed,
+                target = target ?: p.target,
+                counterLabel = counterLabel ?: p.counterLabel,
+                stepIndex = stepIndex ?: p.stepIndex,
+                stepTotal = stepTotal ?: p.stepTotal,
+                liked = liked ?: p.liked,
+                collected = collected ?: p.collected,
+                updatedAt = System.currentTimeMillis()
+            )
+        }
+    }
+
+    /** 上一次真正做风控检查的时刻（[SystemClock.uptimeMillis]），见 [guard] 的降频说明 */
+    private var lastGuardAt = 0L
+
+    /**
+     * 查风控；命中直接抛出，流程无从忽略。
+     *
+     * 走快照而不是自己再遍历一遍：连续动作之间界面没变，快照还能用，省下的是实打实的时间。
+     *
+     * ⚠️ **必须降频**（2026-10-30 真机日志 R-20261030-A88080）：直播间在播视频时一通
+     * 全树遍历实测 **5~16 秒**（610 节点 / 16099ms），而一次关注流程里有 4~5 个
+     * `settle()`，每个后面都跟一次 guard —— 光风控检查就吃掉 60 秒，表现出来就是
+     * 「关注完界面卡住不动」。风控提示是持续可见的（弹窗/文案不会一闪就没），
+     * 隔 [GUARD_MIN_INTERVAL_MS] 查一次完全够；真正的「点完立刻要查」的场合（M3 发评论）
+     * 传 `force = true`。
+     *
+     * @param force 忽略降频，立刻真查一次
+     */
+    suspend fun guard(force: Boolean = false) {
+        val now = SystemClock.uptimeMillis()
+        if (!force && now - lastGuardAt < GUARD_MIN_INTERVAL_MS) return
+        lastGuardAt = now
+        // TTL 与降频窗口一致：上一次检查刚抓的快照直接复用，不重复遍历
+        AnomalyGuard.check(actions.snapshot(ttlMs = GUARD_MIN_INTERVAL_MS))
+            ?.let { throw AnomalyStopException(it) }
+    }
+
+    /**
+     * 随机化等待，**等待结束后自动再查一次风控**。
+     * 把检查和等待绑在一起，是为了让「业务代码忘了查」这件事不可能发生。
+     */
+    suspend fun settle(baseMs: Long) {
+        delay(humanizer.delayMs(baseMs))
+        guard()
+    }
+
+    /**
+     * 长等待（分钟级）用这个：分片执行，每片之间检查停止/暂停，结束后查一次风控。
+     *
+     * 直接用 [settle] 等 60 分钟是不行的——一次 `delay` 期间收不到暂停，
+     * 用户点「暂停」要等满 60 分钟才生效。分片还有个好处：等待期间能顺便
+     * 把剩余时间发到通知栏/悬浮窗，不然界面上一小时都是同一句话。
+     *
+     * @param capMs 抖动后的上限。抖动是 ±30% 的话 60 分钟能漂到 78 分钟，
+     *              而界面上承诺的上限是 60 分钟，所以夹住。
+     * @param jitter 是否再叠一层 ±jitter% 抖动。
+     *              养号的"停留时长"**必须传 false**：调用方已经用 `humanizer.longIn(min,max)`
+     *              掷过骰了，这里再抖一次就成了「随机叠随机」——实际区间会溢出去，
+     *              日志上写"1.5~4 秒"而实测到 5 秒，排查时会以为随机数坏了。
+     * @param shouldInterrupt 每片结束时问一次，返回 true 就提前结束等待。
+     *              给「间隔可设到 1 小时」的场景用：用户在等待期间把目标数调小，
+     *              不该让他在原地等满这一小时才看到效果。
+     */
+    suspend fun settleLong(
+        baseMs: Long,
+        capMs: Long = Long.MAX_VALUE,
+        chunkMs: Long = 1_000L,
+        jitter: Boolean = true,
+        shouldInterrupt: (() -> Boolean)? = null
+    ) {
+        var left = (if (jitter) humanizer.delayMs(baseMs) else baseMs.coerceAtLeast(1L)).coerceAtMost(capMs)
+        var sincePublish = 0L
+        while (left > 0) {
+            val slice = minOf(chunkMs, left)
+            delay(slice)
+            left -= slice
+            sincePublish += slice
+            if (stopped()) return
+            // 未暂停时立即返回；暂停期间挂起在这里，恢复后接着等
+            awaitResume()
+            if (stopped()) return
+            if (shouldInterrupt?.invoke() == true) return
+            if (sincePublish >= PUBLISH_EVERY_MS && left > 0) {
+                sincePublish = 0
+                publish(message = "等待下次扫描，还有 ${left / 1000}s")
+            }
+        }
+        guard()
+    }
+
+    private companion object {
+        const val PUBLISH_EVERY_MS = 10_000L
+
+        /**
+         * 两次风控检查之间的最小间隔。
+         *
+         * 一次全树遍历在直播间实测 **5~16 秒**（`R-20261030-A88080`：610 节点 / 16099ms），
+         * 而 [settle] 每个动作后都会调 [guard]。等待新评论的轮询是 800ms 一轮，
+         * 间隔太小等于「每两三秒就烧掉十几秒」——这正是「评论刷新卡顿」的一大半。
+         *
+         * 5 秒的依据：风控提示（弹窗、半屏浮层、页内红字）都是**持续可读**的，
+         * 不是一闪就没的 toast；沙箱里最坏晚 5 秒发现，也不会让「临时限流」升级成封号。
+         * 真正需要「点完立刻查」的场合（M3 发评论后的 toast 类提示）传 `force = true`。
+         */
+        const val GUARD_MIN_INTERVAL_MS = 5_000L
+    }
+
+    suspend fun awaitResume() = resumeWaiter()
+
+    fun stopped(): Boolean = stopFlag()
+
+    // ==================== 自愈暂停 ====================
+
+    /**
+     * 挂起任务并声明原因（`PAUSED_WAIT`）。
+     *
+     * 语义与手动暂停一致，只是**会自己恢复**：调用方在 [pauseForRecovery] 之后
+     * 自己循环探测（见 `RecoveryWait`），探测成功就 [resumeFromRecovery]。
+     * 用户在悬浮窗/通知栏点「继续」同样能让等待循环退出——所以这里不阻塞。
+     */
+    fun pauseForRecovery(reason: String) = pauseAuto(reason)
+
+    fun resumeFromRecovery() = resumeAuto()
+
+    /**
+     * 当前是否暂停。
+     *
+     * 自愈等待循环用它判断「用户是不是已经手动点了继续」：
+     * 一旦变成 false，说明有人接管了，循环要立刻让出控制权、别再拦着流程。
+     */
+    fun isPaused(): Boolean = pausedFlag()
+
+    suspend fun waitForPage(page: PageState, timeoutMs: Long, pollMs: Long = 200): Boolean {
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        while (SystemClock.uptimeMillis() < deadline) {
+            if (stopped()) return false
+            val detection = detector.detect()
+            publish(page = detection.page)
+            if (detection.page == page) return true
+            delay(humanizer.delayMs(pollMs))
+        }
+        return false
+    }
+}

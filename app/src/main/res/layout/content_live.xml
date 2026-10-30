@@ -16,7 +16,7 @@
         android:paddingEnd="12dp"
         android:paddingBottom="20dp">
 
-        <com.example.dgg.ui.PermissionCardView
+        <com.doujiajia.app.ui.PermissionCardView
             android:id="@+id/perm_card"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

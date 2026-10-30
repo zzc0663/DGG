@@ -22,5 +22,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "DGG"
+rootProject.name = "Doujiajia"
 include(":app")
