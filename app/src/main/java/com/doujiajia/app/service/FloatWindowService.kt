@@ -5,7 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
@@ -37,6 +39,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 
 /**
@@ -62,6 +66,9 @@ import kotlin.math.abs
 class FloatWindowService : Service() {
 
     private lateinit var windowManager: WindowManager
+
+    /** 窗口属性只能在主线程改（见 setTouchable） */
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var binding: ViewFloatStatusBinding? = null
     private var params: WindowManager.LayoutParams? = null
 
@@ -109,7 +116,8 @@ class FloatWindowService : Service() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         // 引擎注入手势时会把本窗口临时设为不可触摸；hitTest 只用于日志取证，见 TouchGuard.covers
         TouchGuard.register(
-            onSuspend = { setTouchable(false) },
+            // 注入手势前必须等主线程真的改完（150ms 足够，主线程此时不忙）
+            onSuspend = { setTouchable(false, awaitMs = TOUCH_SWITCH_AWAIT_MS) },
             onResume = { setTouchable(true) },
             hitTest = { x, y -> coversPoint(x, y) }
         )
@@ -544,11 +552,35 @@ class FloatWindowService : Service() {
      * 只动 [WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE] 这一位，
      * 聚焦位由 [focusableForEdit] 单独管——两者混在一起写会互相覆盖
      * （早期 `setWindowFocusable` 直接 `lp.flags = want`，加上触摸位后就会把对方清掉）。
+     *
+     * ⚠️ **必须回到主线程**：`updateViewLayout` 只能在创建视图的线程调用。
+     * 引擎的 `dispatch()` 跑在协程工作线程上，直接调会抛
+     * `Only the original thread that created a view hierarchy can touch its views`
+     * ——vc44 真机日志里那一串「更新窗口属性失败」就是这个，等于整道防护从未生效过。
+     *
+     * @param awaitMs >0 时阻塞等主线程真的改完（注入手势前必须等，否则手势先落地、防护还没生效）
      */
-    private fun setTouchable(value: Boolean) {
+    private fun setTouchable(value: Boolean, awaitMs: Long = 0L) {
         if (touchable == value) return
         touchable = value
-        applyWindowFlags()
+        val apply = Runnable { applyWindowFlags() }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            apply.run()
+            return
+        }
+        if (awaitMs <= 0L) {
+            mainHandler.post(apply)
+            return
+        }
+        val latch = CountDownLatch(1)
+        mainHandler.post {
+            try {
+                apply.run()
+            } finally {
+                latch.countDown()
+            }
+        }
+        runCatching { latch.await(awaitMs, TimeUnit.MILLISECONDS) }
     }
 
     private fun applyWindowFlags() {
@@ -766,6 +798,9 @@ class FloatWindowService : Service() {
 
         /** 「已关人数」名单最多展示条数（全量在日志里） */
         private const val MAX_NAMES_SHOWN = 40
+
+        /** 等主线程改窗口属性的上限；只用在意「手势别抢在防护生效之前」 */
+        private const val TOUCH_SWITCH_AWAIT_MS = 150L
 
         private const val CLOSE_TEXT = "关闭悬浮窗"
         private const val CLOSE_CONFIRM_TEXT = "再点一次：关闭后只能回 App 停止"
