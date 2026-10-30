@@ -794,19 +794,27 @@ class Actions(
     private suspend fun dispatch(gesture: GestureDescription): Boolean {
         // 手势一定会改变界面，快照立刻作废，避免上层拿着旧界面做判断
         invalidateSnapshot()
-        return suspendCancellableCoroutine { cont ->
-            val callback = object : AccessibilityService.GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) {
-                    if (cont.isActive) cont.resume(true)
-                }
+        // 注入的触摸按坐标命中**最上层窗口**，而我们的悬浮窗就在最上层。
+        // 面板展开（尤其再展开「已关人数」）会盖住评论行，2026-10-30 真机上就把
+        // 面板底部的「关闭悬浮窗」按掉过一次。手势期间临时禁掉悬浮窗触摸，结束后立刻恢复。
+        TouchGuard.suspendForGesture()
+        try {
+            return suspendCancellableCoroutine { cont ->
+                val callback = object : AccessibilityService.GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        if (cont.isActive) cont.resume(true)
+                    }
 
-                override fun onCancelled(gestureDescription: GestureDescription?) {
-                    if (cont.isActive) cont.resume(false)
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        if (cont.isActive) cont.resume(false)
+                    }
                 }
+                val dispatched = runCatching { service.dispatchGesture(gesture, callback, handler) }
+                    .getOrDefault(false)
+                if (!dispatched && cont.isActive) cont.resume(false)
             }
-            val dispatched = runCatching { service.dispatchGesture(gesture, callback, handler) }
-                .getOrDefault(false)
-            if (!dispatched && cont.isActive) cont.resume(false)
+        } finally {
+            TouchGuard.resumeAfterGesture()
         }
     }
 

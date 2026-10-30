@@ -6,6 +6,7 @@ import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -23,6 +24,7 @@ import com.doujiajia.app.databinding.ViewFloatStatusBinding
 import com.doujiajia.app.engine.EngineProgress
 import com.doujiajia.app.engine.EngineState
 import com.doujiajia.app.engine.TaskEngine
+import com.doujiajia.app.engine.TouchGuard
 import com.doujiajia.app.engine.withLiveTarget
 import android.view.inputmethod.InputMethodManager
 import com.doujiajia.app.ui.AppVisibility
@@ -70,6 +72,21 @@ class FloatWindowService : Service() {
     /** 窗口存续期间「盯设置」的轮询任务（见 [startSettingsWatch]） */
     private var syncJob: Job? = null
 
+    /** 「关闭悬浮窗」二次确认的截止时刻（uptimeMillis），0 = 未处于确认态 */
+    private var closeConfirmUntil = 0L
+    private var closeConfirmJob: Job? = null
+
+    /**
+     * 窗口当前是否接收触摸。引擎注入手势期间会被临时置 false（见 [TouchGuard]），
+     * 避免自动化点击落到我们自己的按钮上。
+     */
+    @Volatile
+    private var touchable = true
+
+    /** 编辑目标数字期间窗口需要临时可聚焦；与 [touchable] 是**两个独立的位**，不能互相覆盖 */
+    @Volatile
+    private var focusableForEdit = false
+
     /** 上一次 render 时用的目标数，用来发现设置被别处改过；-1 表示还没画过 */
     private var lastRenderedTarget = -1
 
@@ -90,6 +107,8 @@ class FloatWindowService : Service() {
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        // 引擎注入手势时会把本窗口临时设为不可触摸，见 TouchGuard 的注释
+        TouchGuard.register(onSuspend = { setTouchable(false) }, onResume = { setTouchable(true) })
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -131,10 +150,7 @@ class FloatWindowService : Service() {
         b.floatCollapse.setOnClickListener { setExpanded(false) }
         b.floatToggle.setOnClickListener { onToggle() }
         b.floatFinish.setOnClickListener { onFinish() }
-        b.floatClose.setOnClickListener {
-            LogStore.i(TAG, "用户关闭悬浮窗")
-            stopSelf()
-        }
+        b.floatClose.setOnClickListener { onCloseClicked() }
         b.floatReset.setOnClickListener { onResetToday() }
         b.floatSetTarget.setOnClickListener { onToggleTargetEditor() }
         b.floatTargetOk.setOnClickListener { onApplyTarget() }
@@ -176,6 +192,11 @@ class FloatWindowService : Service() {
             b.floatTargetBox.visibility = View.GONE
             b.floatNamesBox.visibility = View.GONE
             setWindowFocusable(false)
+            // 二次确认态不跨「收起/展开」：收起来就等于放弃了这次关闭意图
+            closeConfirmUntil = 0L
+            closeConfirmJob?.cancel()
+            closeConfirmJob = null
+            b.floatClose.text = CLOSE_TEXT
         }
         // 展开时面板自带背景，root 的胶囊底色要撤掉，否则圆角会漏出一圈
         b.floatRoot.setBackgroundResource(if (value) 0 else R.drawable.bg_float_pill)
@@ -271,6 +292,36 @@ class FloatWindowService : Service() {
             LogStore.i(TAG, "任务已是终态（${state.label}），关闭悬浮窗")
             stopSelf()
         }
+    }
+
+    /**
+     * 「关闭悬浮窗」。**任务还在跑时要求二次确认**。
+     *
+     * 为什么必须加确认：关掉之后**没有任何入口能把它叫回来**——只能回 App 里停止再重新开始。
+     * 2026-10-30 真机上就丢了：23:08:53 用户展开「已关人数」（面板被撑高到评论行区域），
+     * 23:09:01 这颗整行宽的按钮被触发，悬浮窗消失，而引擎还在跑，
+     * 之后 3 分钟用户只能回 App 里点暂停/继续（日志 `R-20261030-80BF03`）。
+     * 触发它的可能是手指，也可能是引擎注入的点击（`TouchGuard` 已另外堵住后者）——
+     * 两条路都要挡，因为「关掉就找不回来」这个代价太大。
+     */
+    private fun onCloseClicked() {
+        val b = binding ?: return
+        val running = TaskEngine.progress.value.state.isActive
+        val now = SystemClock.uptimeMillis()
+        if (running && now > closeConfirmUntil) {
+            closeConfirmUntil = now + CLOSE_CONFIRM_WINDOW_MS
+            b.floatClose.text = CLOSE_CONFIRM_TEXT
+            LogStore.i(TAG, "任务运行中：关闭悬浮窗需要再点一次确认")
+            closeConfirmJob?.cancel()
+            closeConfirmJob = scope.launch {
+                delay(CLOSE_CONFIRM_WINDOW_MS)
+                closeConfirmUntil = 0L
+                binding?.floatClose?.text = CLOSE_TEXT
+            }
+            return
+        }
+        LogStore.i(TAG, "用户关闭悬浮窗（任务${if (running) "仍在运行" else "已结束"}）")
+        stopSelf()
     }
 
     private fun onResetToday() {
@@ -438,8 +489,10 @@ class FloatWindowService : Service() {
         b.floatTargetBox.visibility = View.GONE
         setWindowFocusable(false)
         if (show) {
-            val names = FollowedStore.get(this).allNames()
-            b.floatNamesList.text = if (names.isEmpty()) {
+            val store = FollowedStore.get(this)
+            val names = store.allNames()
+            val already = store.alreadyNames()
+            b.floatNamesList.text = if (names.isEmpty() && already.isEmpty()) {
                 "还没有关注过任何人"
             } else {
                 buildString {
@@ -450,21 +503,50 @@ class FloatWindowService : Service() {
                     if (names.size > MAX_NAMES_SHOWN) {
                         append("\n…… 共 ${names.size} 人")
                     }
+                    // 下面这批**不是我们关注的**：打开资料卡时按钮已经是「取消关注」。
+                    // 不分开列的话，用户会把它们算进「已关」里，数字就对不上手机上的实际关注数
+                    // （2026-10-30 真机反馈的正是这个）。
+                    if (already.isNotEmpty()) {
+                        if (names.isNotEmpty()) append("\n──────────")
+                        append("\n以下 ${already.size} 人打开时已关注，未重复关注：")
+                        already.take(MAX_NAMES_SHOWN).forEach { append("\n· $it") }
+                        if (already.size > MAX_NAMES_SHOWN) append("\n…… 共 ${already.size} 人")
+                    }
                 }
             }
-            LogStore.d(TAG, "展开已关名单：共 ${names.size} 人")
+            LogStore.d(TAG, "展开已关名单：本机关注 ${names.size} 人、原已关注 ${already.size} 人")
         }
     }
 
     /** 编辑输入框期间临时把窗口切成可聚焦；收起必须恢复，否则会挡住抖音的触摸与返回键 */
     private fun setWindowFocusable(focusable: Boolean) {
+        if (focusableForEdit == focusable) return
+        focusableForEdit = focusable
+        applyWindowFlags()
+    }
+
+    /**
+     * 引擎注入手势期间禁掉触摸。
+     *
+     * 只动 [WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE] 这一位，
+     * 聚焦位由 [focusableForEdit] 单独管——两者混在一起写会互相覆盖
+     * （早期 `setWindowFocusable` 直接 `lp.flags = want`，加上触摸位后就会把对方清掉）。
+     */
+    private fun setTouchable(value: Boolean) {
+        if (touchable == value) return
+        touchable = value
+        applyWindowFlags()
+    }
+
+    private fun applyWindowFlags() {
         val lp = params ?: return
         val root = binding?.root ?: return
-        val want = if (focusable) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-        if (lp.flags == want) return
-        lp.flags = want
+        var flags = if (focusableForEdit) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        if (!touchable) flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        if (lp.flags == flags) return
+        lp.flags = flags
         runCatching { windowManager.updateViewLayout(root, lp) }
-            .onFailure { LogStore.w(TAG, "切换窗口焦点失败：${it.message}") }
+            .onFailure { LogStore.w(TAG, "更新窗口属性失败：${it.message}") }
     }
 
     // ==================== 状态跟随 ====================
@@ -628,8 +710,12 @@ class FloatWindowService : Service() {
         job = null
         idleJob?.cancel()
         idleJob = null
+        closeConfirmJob?.cancel()
+        closeConfirmJob = null
         stopSettingsWatch()
         scope.cancel()
+        // 必须先注销：本服务死了，TouchGuard 不能再对着一个没有窗口的实例调开关
+        TouchGuard.unregister()
         binding?.let { b -> runCatching { windowManager.removeView(b.root) } }
         binding = null
         params = null
@@ -667,6 +753,12 @@ class FloatWindowService : Service() {
 
         /** 「已关人数」名单最多展示条数（全量在日志里） */
         private const val MAX_NAMES_SHOWN = 40
+
+        private const val CLOSE_TEXT = "关闭悬浮窗"
+        private const val CLOSE_CONFIRM_TEXT = "再点一次：关闭后只能回 App 停止"
+
+        /** 运行中关闭的二次确认窗口：超过这个时间没再点就撤销，避免长时间停在「一碰就关」的状态 */
+        private const val CLOSE_CONFIRM_WINDOW_MS = 4_000L
 
         /** 悬浮窗「盯设置」的轮询间隔。只在值真的变了才重画，所以 1 秒一次几乎没有代价 */
         private const val SETTINGS_WATCH_MS = 1_000L

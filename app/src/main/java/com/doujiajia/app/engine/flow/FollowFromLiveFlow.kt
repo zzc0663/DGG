@@ -72,7 +72,8 @@ class FollowFromLiveFlow : Flow {
         LogStore.i(
             TAG,
             "开始：本轮目标 $target（界面设置 ${settings.followTarget} / 今日剩余 $remaining），" +
-                "已关注名单 ${store.knownCount()} 人"
+                "已关注名单 ${store.knownCount()} 人" +
+                if (store.alreadyCount() > 0) "（另有 ${store.alreadyCount()} 人打开时已关注，只参与去重）" else ""
         )
 
         var followed = 0
@@ -232,8 +233,11 @@ class FollowFromLiveFlow : Flow {
                 }
 
                 CardState.ALREADY_FOLLOWED -> {
-                    LogStore.i(TAG, "「$nickname」已经是关注状态，跳过并记入已关注名单")
-                    store.markFollowed(nickname)
+                    // 只是「打开时就已关注」，**不是我们关注成功的**：记进独立名单，
+                    // 只用于去重，不进「已关人数」。混在一起会让面板数字凭空多一截
+                    // （2026-10-30 真机：面板 13、实际 7，见 FollowedStore.markAlreadyFollowed 的注释）。
+                    LogStore.i(TAG, "「$nickname」打开时就是已关注，跳过（记入去重名单，不计入「已关」）")
+                    store.markAlreadyFollowed(nickname)
                     // 刚在弹层里读到「已关注」，弹层必然还在，不必再探测
                     closeCard(ctx, targets, knownOpen = true)
                     // 关掉弹层后评论区同样脱离了底部，顺手拉回最新，
@@ -1032,6 +1036,7 @@ class FollowFromLiveFlow : Flow {
                 TAG,
                 "扫描（$source）：原始 ${raw.size} → 评论行 $rows（首见 $freshRows）→ 可用新人 ${candidates.size}" +
                     "（已排除：本轮已处理 ${handled.size}、历史已关注 ${store.knownCount()}、" +
+                    "原已关注 ${store.alreadyCount()}、" +
                     "黑名单 ${ctx.config.excludeNicknames.size}、压输入栏 $skippedLow、行未成型 $skippedThin、" +
                     "非首见 $skippedSeen）" +
                     "；最新 3 人 ${candidates.take(3).joinToString("、") { "${it.name}@y${it.bottomY}" }}"

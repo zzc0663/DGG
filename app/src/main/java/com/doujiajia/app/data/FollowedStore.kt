@@ -18,22 +18,45 @@ import java.util.Locale
  */
 class FollowedStore private constructor(private val prefs: SharedPreferences) {
 
-    fun isFollowed(nickname: String): Boolean = names().contains(nickname)
+    /**
+     * 去重判据 = 真正关注过的 ∪ 打开资料卡时「本来就已关注」的。
+     *
+     * 两边都要排除（不然每次见到同一个人还要白点一次「关注」），但**只有前者算成绩**，
+     * 见 [knownCount] 与 [alreadyCount] 的注释。
+     */
+    fun isFollowed(nickname: String): Boolean =
+        names().contains(nickname) || alreadyNames().contains(nickname)
 
+    /** 真正由本机关注成功的人。悬浮面板「已关」和名单前半段只认这一边。 */
     @Synchronized
     fun markFollowed(nickname: String) {
         val set = LinkedHashSet(names())
-        set.add(nickname)
-        while (set.size > MAX_NAMES) {
-            val iterator = set.iterator()
-            if (!iterator.hasNext()) break
-            iterator.next()
-            iterator.remove()
-        }
+        if (!set.add(nickname)) return
+        trim(set)
         prefs.edit().putString(KEY_NAMES, set.joinToString(SEPARATOR)).apply()
     }
 
+    /**
+     * 打开资料卡时**对方本来就已关注**（按钮已是「取消关注」），我们没关注他。
+     *
+     * 为什么必须单独存：混进 [KEY_NAMES] 会让「已关人数」凭空多出一截。
+     * 2026-10-30 真机就是这个问题——同一场直播里 6 个人本来已关注，
+     * 面板显示「已关 13」而实际只关注了 7 个，用户一眼就看出对不上
+     * （日志 `R-20261030-F16CD0`：23:12:01 `历史已关注 13`，同期进度 7/200）。
+     */
+    @Synchronized
+    fun markAlreadyFollowed(nickname: String) {
+        val set = LinkedHashSet(alreadyNames())
+        if (!set.add(nickname)) return
+        trim(set)
+        prefs.edit().putString(KEY_ALREADY, set.joinToString(SEPARATOR)).apply()
+    }
+
+    /** 本机真正关注过的人数——面板「已关 N」用的就是它 */
     fun knownCount(): Int = names().size
+
+    /** 打开时就已关注、被我们跳过的人数（**不计入**「已关」） */
+    fun alreadyCount(): Int = alreadyNames().size
 
     /**
      * 这个昵称是否被判定过「私密账号」（关注只会发出申请，粉丝数不会增加）。
@@ -66,10 +89,39 @@ class FollowedStore private constructor(private val prefs: SharedPreferences) {
     }
 
     /**
-     * 全部已关注昵称，**按关注时间倒序**（最新关注的最前）。
-     * 悬浮面板「已关人数」直接展示它；数据本身就是这个顺序（markFollowed 追加到尾部）。
+     * 一次性迁移：把 vc41 及以前的「已关注名单」整批移进「打开时已关注」这一边。
+     *
+     * 为什么要迁：vc41 之前两条路都写同一个键（真关注 + 打开就是已关注），
+     * 混在一起之后**没有任何办法事后区分**谁是谁，面板数字必然虚高。
+     * 与其留一个永远对不上的数字，不如把历史记录明确降级成「只参与去重、不计成绩」，
+     * 让「已关」从本版起重新累计——**去重集合一个都没丢**（union 不变），
+     * 所以不会重复关注任何人，只是下次遇到他们要多开一次资料卡（发现是「取消关注」就跳过）。
+     *
+     * 只跑一次（[KEY_MIGRATED]）。当前只有 vc41 装过这个包（换了包名等于换了应用），
+     * 所以受影响的就本机这一份 13 条，迁移代价可以忽略。
+     */
+    private fun migrateLegacyOnce() {
+        if (prefs.getBoolean(KEY_MIGRATED, false)) return
+        val legacy = names()
+        if (legacy.isNotEmpty() && alreadyNames().isEmpty()) {
+            prefs.edit()
+                .putString(KEY_ALREADY, legacy.joinToString(SEPARATOR))
+                .remove(KEY_NAMES)
+                .putBoolean(KEY_MIGRATED, true)
+                .apply()
+            LogStore.i(TAG, "名单迁移：${legacy.size} 条旧记录无法区分来源，已归入「打开时已关注」（只参与去重）")
+        } else {
+            prefs.edit().putBoolean(KEY_MIGRATED, true).apply()
+        }
+    }
+
+    /** 全部**本机关注过**的昵称，按关注时间倒序（最新关注的最前）。
+     * 「原本就已关注」的那批不在这里，见 [alreadyNames]。
      */
     fun allNames(): List<String> = names().toList().asReversed()
+
+    /** 原本就已关注、被跳过的昵称，同样最新在前 */
+    fun alreadyNames(): List<String> = alreadyNamesSet().toList().asReversed()
 
     fun todayCount(): Int {
         if (prefs.getString(KEY_DAY, null) != today()) return 0
@@ -107,16 +159,27 @@ class FollowedStore private constructor(private val prefs: SharedPreferences) {
         }
     }
 
-    private fun names(): Set<String> {
-        val raw = prefs.getString(KEY_NAMES, null) ?: return emptySet()
+    private fun names(): Set<String> = readSet(KEY_NAMES)
+
+    /** 「打开时就已关注」的名单（不计入成绩，只参与去重） */
+    private fun alreadyNamesSet(): Set<String> = readSet(KEY_ALREADY)
+
+    private fun privateNames(): Set<String> = readSet(KEY_PRIVATE)
+
+    private fun readSet(key: String): Set<String> {
+        val raw = prefs.getString(key, null) ?: return emptySet()
         if (raw.isBlank()) return emptySet()
         return raw.split(SEPARATOR).filter { it.isNotBlank() }.toSet()
     }
 
-    private fun privateNames(): Set<String> {
-        val raw = prefs.getString(KEY_PRIVATE, null) ?: return emptySet()
-        if (raw.isBlank()) return emptySet()
-        return raw.split(SEPARATOR).filter { it.isNotBlank() }.toSet()
+    /** 超过上限就先进先出淘汰，避免 SharedPreferences 无限膨胀 */
+    private fun trim(set: LinkedHashSet<String>) {
+        while (set.size > MAX_NAMES) {
+            val iterator = set.iterator()
+            if (!iterator.hasNext()) break
+            iterator.next()
+            iterator.remove()
+        }
     }
 
     private fun today(): String = dayFormat.format(Date())
@@ -124,9 +187,14 @@ class FollowedStore private constructor(private val prefs: SharedPreferences) {
     companion object {
         private const val TAG = "关注记录"
         private const val PREFS = "dgg_followed"
+        /** 本机**真正关注成功**的昵称 */
         private const val KEY_NAMES = "followed_names"
+        /** 打开资料卡时就已关注、被跳过的昵称（vc42 起与上面分开，之前混在 [KEY_NAMES] 里） */
+        private const val KEY_ALREADY = "already_followed_names"
         /** 私密账号名单：关注只会发申请、粉丝数不增加，永远不会进 [KEY_NAMES] */
         private const val KEY_PRIVATE = "private_names"
+        /** vc42 的一次性迁移标记：「已关注名单」已与「打开时已关注」拆开 */
+        private const val KEY_MIGRATED = "split_migrated_v42"
         private const val KEY_DAY = "day_key"
         private const val KEY_DAY_COUNT = "day_count"
         private const val SEPARATOR = "\n"
@@ -141,7 +209,10 @@ class FollowedStore private constructor(private val prefs: SharedPreferences) {
             instance ?: synchronized(this) {
                 instance ?: FollowedStore(
                     context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                ).also { instance = it }
+                ).also {
+                    it.migrateLegacyOnce()
+                    instance = it
+                }
             }
     }
 }
