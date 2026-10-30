@@ -84,6 +84,15 @@ object OtaManager {
         val query = OtaQuery.forCurrent(context)
         LogStore.i(TAG, "检查更新：当前 ${current}（${query.channel}/${query.abi}）")
 
+        // 读不到自己的 versionCode 是异常状态（自家应用一定能读到），**不能当成「版本 0」继续**：
+        // 那样会「永远有新版本」→ 下载 4.6 MB → 校验第 4 道（严格递增）在 0 上恒成立而形同失效。
+        // 2026-10-30 就是这么在 API 28~32 的设备上连试 5 轮全失败（日志 R-20261030-E82372）。
+        if (current <= 0) {
+            LogStore.e(TAG, "读不到当前 versionCode（$current），中止检查更新以免无意义下载")
+            _state.value = OtaState.Idle
+            return null
+        }
+
         val result = providerOf(context).latest(query)
         store.lastCheckAt = System.currentTimeMillis()
 

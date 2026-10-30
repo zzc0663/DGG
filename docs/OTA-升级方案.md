@@ -455,3 +455,71 @@ POST /api/v1/admin/releases/:id/publish
 
 - 通知栏的下载进度目前只在 `OtaService` 里，安装完成后不自动回到 App（用户自己点回来）。
 - 没有「稍后提醒」以外的灰度/强制更新（契约里刻意不含 `force`）。
+
+---
+
+## 13. OTA 在旧系统上必然失败：`PackageInfoFlags` 的最小 API 用错了（2026-10-30，vc33 / 1.4.4）
+
+### 现场（日志 `R-20261030-E82372`，设备 versionCode=18 / 1.3.1）
+
+```
+19:54:55 I/OTA: 检查更新：当前 0（stable/arm64-v8a）
+19:54:55 I/OTA: 已是最新版本（0）            ← 首次（服务端还没发 1.4.3）
+19:56:22 I/OTA: 发现新版本 1.4.3(32)，当前 0   ← 「当前」是 0，不是 18
+19:56:34 I/OTA: 下载完成并校验通过：dgg-32.apk（4822672 字节）
+19:56:34 W/OTA: 解析 APK 失败：No static method of(J)Landroid/content/pm/
+                 PackageManager$PackageInfoFlags; in class ... or its super classes
+19:56:34 E/OTA: 校验拒绝：不是有效的 APK（解析失败，可能下载不完整）
+19:56:34 W/主界面: OTA 失败：不是有效的 APK（解析失败，可能下载不完整）
+```
+
+随后 19:56:36 / 19:56:56 / 19:57:26 / 19:58:17 又完整重试 4 轮，**每轮都先下 4.6 MB 再失败**。
+
+### 根因：把两个**互相独立**的 API 分界当成了一个
+
+`OtaVerifier` 里两处重载都用 `SDK_INT >= Build.VERSION_CODES.P`（28）判断：
+
+| 分界 | 实际 API | 说明 |
+|---|---|---|
+| 签名集合怎么取（`signingInfo` / `GET_SIGNING_CERTIFICATES`） | **28**（P） | 这一段判断是对的 |
+| 带 flags 的重载（`PackageManager.PackageInfoFlags.of(long)`） | **33**（TIRAMISU） | 这一段判断错了 |
+
+在 Android 9~12L（API 28~32）上 `PackageInfoFlags` 这个类**根本不存在**，于是：
+
+1. `installedInfo()` 抛 `NoSuchMethodError` → 被 `runCatching` 吞掉 → 返回 null →
+   `currentVersionCode()` = **0**。这就是日志里的「当前 0」。
+2. `archiveInfo()` 抛同样的错 → 返回 null → 第 1 道校验「能解析成 APK」直接判失败 →
+   「不是有效的 APK」。**包是好的**（sha256 与流式校验都通过了），是校验器自己坏了。
+
+而且 `currentVersionCode = 0` 还有连带伤害：第 4 道「versionCode 严格递增」变成
+`newCode <= 0` 恒成立——**降级保护静默失效**。
+
+### 为什么一直没被发现
+
+主测机（OPPO PLB110 / Android 17 / API 37）满足 `SDK_INT >= 33`，走的是正确分支。
+这个缺陷只在 **Android 9~12L** 的机器上暴露，属于典型的「开发机永远触发不到」。
+
+### 改法（三点）
+
+1. **阈值改对**：新增 `infoFlags()` 统一决定 flags（28 分界取 `GET_SIGNING_CERTIFICATES`），
+   重载选择单独用 `SDK_INT >= TIRAMISU`。API 28~32 走 `getPackageArchiveInfo(String, int)` /
+   `getPackageInfo(String, int)` 这两个从 API 1 就存在的重载。
+2. **`installedInfo` 失败不再静默**：`onFailure` 打 warn（「读取已安装版本失败：…」）。
+   原来它是无声的，只能从「当前 0」这种间接现象反推。
+3. **两道防护**，让同类问题下次立刻暴露而不是狂下 4.6 MB：
+   - `OtaManager.check()`：`current <= 0` 直接中止并 `LogStore.e`。
+   - `OtaVerifier.verify()`：`currentVersionCode <= 0` 直接 `Rejected`——
+     因为第 4 道校验此时形同虚设，宁可拒绝安装也不能让降级保护失效。
+
+### 验证
+
+- 编译通过；`grep PackageInfoFlags` 确认只剩两处，且都在 `SDK_INT >= TIRAMISU` 分支内。
+- 主测机（API 37）装 vc33 → 点头顶版本号 → toast「**已是最新版本 v1.4.4**」，
+  说明 `currentVersionCode` 读到 33（< 33 时会显示「发现新版本 32，当前 0」）。
+- API 28~32 的路径本机无法复现（没有该区间设备），逻辑上走的是 API 1 起就有的重载；
+  待那台设备手动装 vc33 后由日志确认。
+
+### 一个操作前提
+
+那台设备当前装的是 vc18，**它自己的 OTA 链路就是坏的**，所以修复包只能**手动装一次**
+（`adb install -r` 或拷 APK 到手机点开）。装上 vc33 之后，后续升级才走 OTA。

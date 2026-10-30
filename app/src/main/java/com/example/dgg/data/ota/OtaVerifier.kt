@@ -41,6 +41,11 @@ object OtaVerifier {
         if (!apk.isFile || apk.length() <= 0L) {
             return VerifyResult.Rejected("安装包不存在或为空")
         }
+        // 第 4 道（versionCode 严格递增）在 currentVersionCode = 0 时恒成立，等于没校验。
+        // 读不到当前版本是异常状态，宁可拒绝也不能让降级保护静默失效。
+        if (currentVersionCode <= 0) {
+            return VerifyResult.Rejected("读不到当前应用版本号，无法校验版本递增（拒绝安装）")
+        }
 
         val pm = context.packageManager
         val archive = archiveInfo(pm, apk)
@@ -85,32 +90,49 @@ object OtaVerifier {
         return versionCodeOf(info)
     }
 
-    // ==================== 平台差异封装（minSdk 24，签名 API 在 28 变过） ====================
+    // ==================== 平台差异封装（minSdk 24） ====================
+    //
+    // 🔴 这里有两个**互相独立**的 API 分界，历史上把它们当成一个就踩过坑：
+    //
+    // | 分界 | API | 影响 |
+    // |---|---|---|
+    // | 签名集合怎么取 | 28 (P) | `signingInfo` / `GET_SIGNING_CERTIFICATES` 从 28 起才有 |
+    // | 重载签名怎么传 | 33 (TIRAMISU) | `PackageInfoFlags.of(long)` 从 **33** 起才有 |
+    //
+    // 2026-10-30 线上事故：两个重载都用 `SDK_INT >= P` 判断，于是在 **Android 9~12L（API 28~32）**
+    // 上调用 `PackageInfoFlags.of(0L)` → `NoSuchMethodError`（framework.jar 里根本没有这个类）。
+    // 后果是**静默的**：`currentVersionCode()` 拿不到值返回 0，`archiveInfo()` 返回 null。
+    // 面板表现是「发现新版本 32，当前 0」→ 下载 4.6 MB →「不是有效的 APK」→ 循环重试全失败。
+    // 查证见日志 R-20261030-E82372：`No static method of(J)Landroid/content/pm/PackageManager$PackageInfoFlags;`
 
-    private fun archiveInfo(pm: PackageManager, apk: File): PackageInfo? = runCatching {
+    /** 取 PackageInfo 需要的 flags（签名集合在 28 起改用 GET_SIGNING_CERTIFICATES） */
+    private fun infoFlags(): Int =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            pm.getPackageArchiveInfo(
-                apk.absolutePath,
-                PackageManager.PackageInfoFlags.of(
-                    PackageManager.GET_SIGNING_CERTIFICATES.toLong()
-                )
-            )
+            PackageManager.GET_SIGNING_CERTIFICATES
         } else {
             @Suppress("DEPRECATION")
-            pm.getPackageArchiveInfo(apk.absolutePath, PackageManager.GET_SIGNATURES)
+            PackageManager.GET_SIGNATURES
+        }
+
+    private fun archiveInfo(pm: PackageManager, apk: File): PackageInfo? = runCatching {
+        val flags = infoFlags()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.getPackageArchiveInfo(apk.absolutePath, PackageManager.PackageInfoFlags.of(flags.toLong()))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.getPackageArchiveInfo(apk.absolutePath, flags)
         }
     }.onFailure { LogStore.w(TAG, "解析 APK 失败：${it.message}") }.getOrNull()
 
     private fun installedInfo(pm: PackageManager, pkg: String): PackageInfo? = runCatching {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            pm.getPackageInfo(pkg, PackageManager.PackageInfoFlags.of(
-                PackageManager.GET_SIGNING_CERTIFICATES.toLong()
-            ))
+        val flags = infoFlags()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.getPackageInfo(pkg, PackageManager.PackageInfoFlags.of(flags.toLong()))
         } else {
             @Suppress("DEPRECATION")
-            pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES)
+            pm.getPackageInfo(pkg, flags)
         }
-    }.getOrNull()
+    }.onFailure { LogStore.w(TAG, "读取已安装版本失败：${it.message}") }.getOrNull()
 
     private fun signersOf(info: PackageInfo): List<ByteArray> =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
