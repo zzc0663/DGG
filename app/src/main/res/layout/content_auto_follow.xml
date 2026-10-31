@@ -127,11 +127,35 @@
                 </LinearLayout>
             </LinearLayout>
 
-            <!-- 定时休息：内联一行（关掉开关则两个输入框置灰，但保留已填数值） -->
+            <!-- 定时休息：标题行（说明这个开关管什么）+ 参数行 + 关闭提示。
+                 原来只有「每关注 5 个后休息 30 秒」+ 最右一个裸开关，用户不知道开关管哪行，
+                 关掉后两个框变灰又像"坏了不能设置"。 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="14dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:text="定时休息" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/sw_interval_rest"
+                    style="@style/AppSwitch"
+                    android:checked="true" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
@@ -165,12 +189,15 @@
                     android:layout_width="0dp"
                     android:layout_height="1dp"
                     android:layout_weight="1" />
-
-                <com.google.android.material.switchmaterial.SwitchMaterial
-                    android:id="@+id/sw_interval_rest"
-                    style="@style/AppSwitch"
-                    android:checked="true" />
             </LinearLayout>
+
+            <TextView
+                android:id="@+id/tv_rest_off_hint"
+                style="@style/TxtHint"
+                android:layout_width="match_parent"
+                android:layout_marginTop="4dp"
+                android:text="已关闭：跑的过程中不会中途休息"
+                android:visibility="gone" />
 
             <!-- 以下三项尚未接入流程：置灰 + 明示「暂未生效」 -->
             <LinearLayout

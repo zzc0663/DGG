@@ -538,9 +538,10 @@ class MainActivity : AppCompatActivity() {
     /**
      * 定时休息：开关控制两个输入框是否可用（关掉只置灰，**不清空用户填的数**）。
      *
-     * 顺带把两个输入框从无约束的 [bindIntField] 换成 [bindRangedIntField]：
-     * 原来填 0 或负数会让 `restAfterN` 参与取模、`restSeconds` 变成"休息 0 秒"，
+     * 两个框必须有范围：填 0 会让 `restAfterN` 参与取模、`restSeconds` 变成"休息 0 秒"，
      * 实际效果是休息被静默跳过，日志里看不出问题。
+     * ⚠️ 秒数下限是 **1**，不是 5 —— min=5 会让「30 / 120」这类首位 1~4 的数字输不进去
+     * （旧版逐键夹取，见 [bindRangedIntField] 的注释与 vc54 记录）。
      */
     private fun bindIntervalRest(c: ContentAutoFollowBinding, s: Settings) {
         bindRangedIntField(c.etRestAfterN, s.restAfterN, REST_AFTER_N_MIN, REST_AFTER_N_MAX) { v ->
@@ -556,11 +557,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** 关掉开关时不只是置灰：给一行明说的提示，否则「灰的输入框」会被当成「坏了，不能设置」。 */
     private fun renderIntervalRestEnabled(c: ContentAutoFollowBinding, enabled: Boolean) {
         listOf(c.etRestAfterN, c.etRestSeconds).forEach {
             it.isEnabled = enabled
             it.alpha = if (enabled) 1f else 0.4f
         }
+        c.tvRestOffHint.visibility = if (enabled) View.GONE else View.VISIBLE
     }
 
     private fun bindNurture(s: Settings) {
@@ -668,12 +671,24 @@ class MainActivity : AppCompatActivity() {
         ) { index -> store.edit { it.copy(enterMode = index) } }
 
         bindSwitch(c.swMicRequest, s.micRequest) { v -> store.edit { it.copy(micRequest = v) } }
-        bindIntField(c.etCommentGapMin, s.commentGapMin) { v -> store.edit { it.copy(commentGapMin = v) } }
-        bindIntField(c.etCommentGapMax, s.commentGapMax) { v -> store.edit { it.copy(commentGapMax = v) } }
+        // 这五个框原来是 [bindIntField]（**零约束**）：填 0 会得到「评论间隔 0 秒」= 刷屏、
+        // 「点赞 0 个」= 点了不算数，而且全程没有任何提示。统一接上有范围的原语。
+        bindRangedIntField(
+            c.etCommentGapMin, s.commentGapMin, Settings.COMMENT_GAP_MIN, Settings.COMMENT_GAP_MAX
+        ) { v -> store.edit { it.copy(commentGapMin = v) } }
+        bindRangedIntField(
+            c.etCommentGapMax, s.commentGapMax, Settings.COMMENT_GAP_MIN, Settings.COMMENT_GAP_MAX
+        ) { v -> store.edit { it.copy(commentGapMax = v) } }
         bindSwitch(c.swLikeOnComment, s.likeOnComment) { v -> store.edit { it.copy(likeOnComment = v) } }
-        bindIntField(c.etLikeTrigger, s.likeTrigger) { v -> store.edit { it.copy(likeTrigger = v) } }
-        bindIntField(c.etLikeCountMin, s.likeCountMin) { v -> store.edit { it.copy(likeCountMin = v) } }
-        bindIntField(c.etLikeCountMax, s.likeCountMax) { v -> store.edit { it.copy(likeCountMax = v) } }
+        bindRangedIntField(
+            c.etLikeTrigger, s.likeTrigger, Settings.LIKE_TRIGGER_MIN, Settings.LIKE_TRIGGER_MAX
+        ) { v -> store.edit { it.copy(likeTrigger = v) } }
+        bindRangedIntField(
+            c.etLikeCountMin, s.likeCountMin, Settings.LIKE_COUNT_MIN, Settings.LIKE_COUNT_MAX
+        ) { v -> store.edit { it.copy(likeCountMin = v) } }
+        bindRangedIntField(
+            c.etLikeCountMax, s.likeCountMax, Settings.LIKE_COUNT_MIN, Settings.LIKE_COUNT_MAX
+        ) { v -> store.edit { it.copy(likeCountMax = v) } }
 
         bindSegmented(
             listOf(c.segCommentCopy, c.segCommentPreset), s.commentMode, grouped = false
@@ -685,22 +700,23 @@ class MainActivity : AppCompatActivity() {
 
     // ---- 绑定原语 ----
 
-    private fun bindIntField(edit: EditText, value: Int, onChange: (Int) -> Unit) {
-        edit.setText(value.toString())
-        edit.doAfterTextChanged { text ->
-            val v = text?.toString()?.toIntOrNull() ?: return@doAfterTextChanged
-            onChange(v)
-        }
-    }
-
     /**
-     * 带范围的数字输入框（关注数量 / 关注上限）。
+     * 带范围的数字输入框。
      *
-     * 三处细节：
-     * 1. **长度过滤**先挡一道（10000 最多 5 位），避免「99999」这种输入一路写进参数；
-     * 2. 输入中超出上限**立即夹取并回写**，不让非法值停留在设置里；
-     * 3. 失焦时兜底——用户可能把内容清空或留下「0」，此时填回合法值并提示。
-     *    没有这一条，清空输入框后参数会停在旧值，界面和设置不一致。
+     * 🔴 **输入过程中绝不夹取、绝不 `setText`** —— 这是 vc54 修的坑：
+     * 旧实现在 `doAfterTextChanged` 里 `coerceIn` 后立刻回写，配合「休息秒数 min=5」，
+     * 会让**首位小于 min 的数字根本输不进去**：想打 30，敲 `3` 当场被改成 5，光标被挪走，
+     * 后面那个 `0` 落空。用户看到的就是「最大只能填 5」。日志 `R-20261030-774556` 里
+     * 秒框一直是空的、运行时停在 55s（唯一首位 ≥5 的成功输入）就是这么来的。
+     *
+     * 现在的规则：
+     * 1. 合法值**实时落库**（改目标数不用等失焦就生效）；
+     * 2. 非法值只留在框里，**不写设置**；
+     * 3. 失焦 / 键盘「完成」时夹取一次并 toast；框是空的就回填 [lastGood]
+     *    （不写 0、也不回落到 min——用户清空只是想重打）。
+     *
+     * 长度过滤固定 6 位，只挡「连按不停」；超范围交给失焦夹取。
+     * 用 `max.toString().length` 会把「1200」静默截成「120」，既不提示也不等于上限 600。
      */
     private fun bindRangedIntField(
         edit: EditText,
@@ -708,30 +724,45 @@ class MainActivity : AppCompatActivity() {
         min: Int,
         max: Int,
         onChange: (Int) -> Unit
+    ) = bindRangedIntField(edit, value, { min }, { max }, onChange)
+
+    /** 上限会随别的控件变（扫描间隔切秒/分钟）时用这个重载。 */
+    private fun bindRangedIntField(
+        edit: EditText,
+        value: Int,
+        minProvider: () -> Int,
+        maxProvider: () -> Int,
+        onChange: (Int) -> Unit
     ) {
-        edit.setText(value.coerceIn(min, max).toString())
-        edit.filters = arrayOf(InputFilter.LengthFilter(max.toString().length))
+        var lastGood = value
+        edit.setText(lastGood.toString())
+        edit.filters = arrayOf(InputFilter.LengthFilter(MAX_DIGITS))
 
         edit.doAfterTextChanged { text ->
             val raw = text?.toString()?.toIntOrNull() ?: return@doAfterTextChanged
-            val v = raw.coerceIn(min, max)
-            if (v != raw) {
+            if (raw in minProvider()..maxProvider()) {
+                lastGood = raw
+                onChange(raw)
+            }
+        }
+
+        fun commit() {
+            val min = minProvider()
+            val max = maxProvider()
+            val raw = edit.text?.toString()?.toIntOrNull()
+            val v = (raw ?: lastGood).coerceIn(min, max)
+            // 归一化：空框、前导 0（"030"）、超范围都改回标准写法。这里没有输入法在打字，可以安全 setText。
+            if (raw != v || edit.text?.toString() != v.toString()) {
                 edit.setText(v.toString())
                 edit.setSelection(edit.text?.length ?: 0)
-                return@doAfterTextChanged   // setText 会再触发本回调，夹取后的值在那里写入
             }
+            if (raw != null && raw != v) toast("已调整为 $min ~ $max 范围内的 $v")
+            lastGood = v
             onChange(v)
         }
-        edit.setOnFocusChangeListener { _, hasFocus ->
-            if (hasFocus) return@setOnFocusChangeListener
-            val raw = edit.text?.toString()?.toIntOrNull()
-            val v = (raw ?: min).coerceIn(min, max)
-            if (raw != v) {
-                edit.setText(v.toString())
-                toast("已调整为 $min ~ $max 范围内的 $v")
-            }
-            onChange(v)
-        }
+
+        edit.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus) commit() }
+        edit.setOnEditorActionListener { _, _, _ -> commit(); false }
     }
 
     /**
@@ -744,34 +775,17 @@ class MainActivity : AppCompatActivity() {
      */
     private fun bindScanInterval(c: ContentAutoFollowBinding) {
         val s = store.current
-        c.etScanInterval.setText(s.scanIntervalValue.toString())
 
-        val commit: (Int) -> Unit = { v ->
+        // 上下限是动态的（秒 ≤3600 / 分钟 ≤60），走 provider 重载；
+        // 切单位后不用重建绑定，[bindRangedIntField] 每次读写都会重新问一遍。
+        bindRangedIntField(
+            c.etScanInterval,
+            s.scanIntervalValue,
+            { Settings.MIN_SCAN_SECONDS.toInt() },
+            { Settings.scanValueMax(store.current.scanIntervalUnit) }
+        ) { v ->
             store.edit { it.copy(scanIntervalValue = v) }
             LogStore.i(TAG, "扫描间隔 = ${store.current.scanIntervalLabel}")
-        }
-        fun maxOf(unit: Int) = Settings.scanValueMax(unit)
-
-        c.etScanInterval.doAfterTextChanged { text ->
-            val raw = text?.toString()?.toIntOrNull() ?: return@doAfterTextChanged
-            val v = raw.coerceIn(Settings.MIN_SCAN_SECONDS.toInt(), maxOf(store.current.scanIntervalUnit))
-            if (v != raw) {
-                c.etScanInterval.setText(v.toString())
-                c.etScanInterval.setSelection(c.etScanInterval.text?.length ?: 0)
-                return@doAfterTextChanged
-            }
-            commit(v)
-        }
-        c.etScanInterval.setOnFocusChangeListener { _, hasFocus ->
-            if (hasFocus) return@setOnFocusChangeListener
-            val max = maxOf(store.current.scanIntervalUnit)
-            val raw = c.etScanInterval.text?.toString()?.toIntOrNull()
-            val v = (raw ?: Settings.DEFAULT_SCAN_VALUE).coerceIn(Settings.MIN_SCAN_SECONDS.toInt(), max)
-            if (raw != v) {
-                c.etScanInterval.setText(v.toString())
-                toast("已调整为 1 ~ $max 范围内的 $v")
-            }
-            commit(v)
         }
 
         bindSegmented(
@@ -780,7 +794,7 @@ class MainActivity : AppCompatActivity() {
             if (unit == store.current.scanIntervalUnit) return@bindSegmented
             val totalSeconds = store.current.scanTotalSeconds()
             val newVal = if (unit == Settings.UNIT_MINUTE) {
-                (totalSeconds / 60).toInt().coerceIn(1, maxOf(Settings.UNIT_MINUTE))
+                (totalSeconds / 60).toInt().coerceIn(1, Settings.scanValueMax(Settings.UNIT_MINUTE))
             } else {
                 totalSeconds.coerceIn(Settings.MIN_SCAN_SECONDS, Settings.MAX_SCAN_SECONDS).toInt()
             }
@@ -1746,8 +1760,24 @@ class MainActivity : AppCompatActivity() {
          */
         private const val REST_AFTER_N_MIN = 1
         private const val REST_AFTER_N_MAX = 500
-        private const val REST_SECONDS_MIN = 5
+
+        /**
+         * 休息秒数下限是 **1**（原为 5）。
+         *
+         * vc49 设成 5 时踩了个隐蔽的坑：数字框逐键夹取，「想打 30 敲 3」当场被改成 5，
+         * 于是「任何首位 1~4 的数字都输不进去」，用户理解成「最大只能填 5」。
+         * 夹取逻辑已在 vc54 改成失焦时执行，这里把下限放开到 1，不再有隐式约束。
+         */
+        private const val REST_SECONDS_MIN = 1
         private const val REST_SECONDS_MAX = 600
+
+        /**
+         * 数字框一律最多 6 位。
+         *
+         * 不按 `max.toString().length` 取：那样「1200」会被静默截成「120」，
+         * 既不提示、也不等于上限 600，用户以为填进去了。超范围交给失焦时的夹取 + toast。
+         */
+        private const val MAX_DIGITS = 6
 
         private val TAB_NAMES = listOf("自动关注", "养号助手", "直播互动")
 

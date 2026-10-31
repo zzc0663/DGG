@@ -50,6 +50,14 @@
         <item name="android:textColor">@color/text_primary</item>
     </style>
 
+    <!-- 灰色小字提示：用来说明「为什么这块是灰的 / 这个开关管什么」 -->
+    <style name="TxtHint">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textSize">11sp</item>
+        <item name="android:textColor">@color/text_tertiary</item>
+    </style>
+
     <!-- ============ 输入框 ============ -->
     <style name="InputBox" parent="Widget.AppCompat.EditText">
         <item name="android:layout_width">match_parent</item>
@@ -68,9 +76,9 @@
     </style>
 
     <!-- 迷你输入框：用在「每关注 [N] 个后休息 [M] 秒」这种内联一行里。
-         宽度固定，居中显示数字；去掉 InputBox 的左右 12dp 内边距，否则 52dp 里放不下 3 位数。 -->
+         宽度 60dp：52dp 时 3 位数（600）+ 字体 1.3 倍就贴边、光标几乎看不见。 -->
     <style name="InputMini" parent="Widget.AppCompat.EditText">
-        <item name="android:layout_width">52dp</item>
+        <item name="android:layout_width">60dp</item>
         <item name="android:layout_height">32dp</item>
         <item name="android:background">@drawable/bg_input</item>
         <item name="android:paddingStart">2dp</item>

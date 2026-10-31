@@ -150,29 +150,44 @@ Header: If-None-Match: <etag>
 | 0 | **sha256** | `OtaDownloader` 边下边算 digest，与 manifest 比对（不符删 `.part` 重试） | 传输损坏、CDN 缓存污染 |
 | 1 | **能解析成 APK** | `getPackageArchiveInfo` 返回 null 即拒 | 下到 HTML 错误页 / 截断文件 |
 | 2 | **包名一致** | `archive.packageName == context.packageName` | 装成别的应用 |
-| 3 | **签名一致** | 下载包与**本机已安装应用**的 `apkContentsSigners` 逐字节比对 | 服务端被攻破 / 中间人替换包 / 二次打包 |
+| 3 | **签名一致** | 下载包与**本机已安装应用**的签名证书逐字节比对（读法见下方三个坑） | 服务端被攻破 / 中间人替换包 / 二次打包 |
 | 4 | **版本号递增** | `newVersionCode > 当前 versionCode` | 降级攻击（把人降到有漏洞的旧版） |
 
 第 3 道的关键是**不信任服务端下发的指纹**——只跟本机已安装应用比。让服务端下发期望值
 等于把信任建立在同一个地方，没有增加任何安全性。
 
-实现要点（minSdk 24，签名 API 在 28 变过，`OtaVerifier` 里做了双分支）：
+实现要点（minSdk 24，签名 API 在 28 变过，`OtaVerifier` 里做了双分支 + **一次回退**）：
 
 ```kotlin
-val flags = if (SDK_INT >= P) PackageInfoFlags.of(GET_SIGNING_CERTIFICATES.toLong()) else GET_SIGNATURES
-val archive = pm.getPackageArchiveInfo(apk.absolutePath, flags) ?: return Rejected("不是有效的 APK")
-if (archive.packageName != context.packageName) return Rejected("包名不符")
-val mine = context.packageName.let { pm.getPackageInfo(it, flags) }.signersOf()
-if (setOfBytes(mine) != setOfBytes(archive.signersOf())) return Rejected("签名与当前应用不一致（拒绝安装）")
-if (archive.versionCodeOf() <= currentVersionCode) return Rejected("版本号未递增")
+// 两处都要带回退：API 28~32 读「未安装的 APK 文件」时 signingInfo 是空的
+val mine   = fetchSigners(pm, context.packageName, installedInfo(pm, context.packageName))
+val theirs = fetchSigners(pm, apk,                 archiveInfo(pm, apk))
+if (!sameSigners(mine, theirs)) return Rejected("签名与当前应用不一致（拒绝安装）")
+if (versionCodeOf(archive) <= currentVersionCode) return Rejected("版本号未递增")
 ```
+
+### 5.1 签名读取踩过的三个坑（按时间，都是线上/真机事故）
+
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | `NoSuchMethodError: PackageInfoFlags.of` | `PackageInfoFlags.of` 是 **API 33** 才有的，却按 `SDK >= P` 判断 | 分界改 33（`TIRAMISU`），32 及以下走 int flags |
+| 2 | API < 28 报「安装包没有签名」 | AGP 在 minSdk≥24 时默认只签 v2，旧系统只能读 v1（JAR）签名 | 构建时 `enableV1Signing = true` |
+| 3 | API 28~32 报「读不到下载包的签名」 | `getPackageArchiveInfo` 读**未安装的 APK 文件**时**不填 `signingInfo`**（只有已安装应用的 `PackageInfo` 才有） | `fetchSigners()` 读到空就换 `GET_SIGNATURES` 再读一次；另补 `enableV3Signing` |
+
+第 3 条代价最大：**vc41~vc52 在 Android 9~12L（API 28~32）上 OTA 全部失效** ——
+日志 `R-20261030-445040`，一台 Android 10 设备从 1.4.11 升最新版连试 5 轮全挂，
+每次都报「安装包没有签名」。主测机是 Android 17，所以这个洞一直没暴露。
+
+⚠️ **已装在设备上的坏版本救不回来**（校验代码在旧包里），只能手动装一次 vc53 及以上。
+补签 v3 只是给老设备一个"也许能直接读到"的机会，别指望它一定生效。
 
 另外：
 
 - 明文流量一律禁止（`usesCleartextTraffic="false"` + `network_security_config.xml`），
   仅对 `127.0.0.1` / `localhost` 开例外，供 `adb reverse` 本地联调。
 - 下载只落 `cacheDir/ota/`；`.part` 长度即续传进度，校验不过立刻删。
-- **永远不自动安装**：即使服务端标记强更，也必须用户点一次系统安装器确认。
+- **不做静默安装**：vc52 起下载完成会自动弹窗并直接调起系统安装器（§6.1），
+  但最后一步"装"永远由用户在系统界面点确认。
 
 ---
 

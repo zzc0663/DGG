@@ -132,6 +132,18 @@ data class Settings(
         const val FOLLOW_COUNT_MIN = 1
         const val FOLLOW_COUNT_MAX = 10_000
 
+        /**
+         * 直播互动几个数字框的合法范围（原先走无约束的 `bindIntField`，填 0 会直接进引擎：
+         * 「评论间隔 0 秒」= 刷屏、「点赞 0 个」= 点了不算数）。
+         * 默认值 5 / 15 / 3 / 5 / 10 全在区间内，不需要迁移。
+         */
+        const val COMMENT_GAP_MIN = 1
+        const val COMMENT_GAP_MAX = 600
+        const val LIKE_TRIGGER_MIN = 1
+        const val LIKE_TRIGGER_MAX = 50
+        const val LIKE_COUNT_MIN = 1
+        const val LIKE_COUNT_MAX = 200
+
         /** 某单位下数值的合法上限：秒 → 3600，分钟 → 60 */
         fun scanValueMax(unit: Int): Int =
             if (unit == UNIT_MINUTE) (MAX_SCAN_SECONDS / 60).toInt() else MAX_SCAN_SECONDS.toInt()
