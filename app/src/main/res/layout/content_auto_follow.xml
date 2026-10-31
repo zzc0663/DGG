@@ -1,15 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  自动关注 · 参数区（vc49 起为「一页放下」布局）
+  自动关注 · 参数区（vc55 起，直播互动参数并入本页，本页需滚动）
 
   设计约束（真机 360×791dp，可视内容区 589dp）：
   - 三个核心参数（目标 / 每日上限 / 扫描间隔）压成**一行三列**，每列 96dp；
     「目标关注数量」「每日关注上限」6 字 12sp = 72dp，「10000」14sp ≈ 64dp，都放得下。
   - 不再有「校准模式」「延迟抖动」：前者是死参数，后者改为固定 ±30% 内建。
-  - 定时休息压成内联一行，用 InputMini（52×32）。
+  - 定时休息压成内联一行，用 InputMini（60×32）。
   - 三个开关目前**未接入任何流程**（引擎里零引用），置灰 + 标「暂未生效」，
     以后接流程只需把 isEnabled 改 true 并删掉注记。
   - 授权信息卡整卡删除，入口在顶栏 tv_license_badge（含到期日期）。
+  - vc55：原「直播互动」页签的 3 张参数卡合并成本页最后一张卡的 8 行（570dp → 292dp），
+    页签减为两个。**整页约 830dp（1.4 屏）**，底部 96dp 内边距是给 FAB 让位。
 -->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
@@ -25,7 +27,7 @@
         android:paddingStart="12dp"
         android:paddingTop="12dp"
         android:paddingEnd="12dp"
-        android:paddingBottom="20dp">
+        android:paddingBottom="96dp">
 
         <com.doujiajia.app.ui.PermissionCardView
             android:id="@+id/perm_card"
@@ -289,45 +291,256 @@
                     android:alpha="0.5"
                     android:enabled="false" />
             </LinearLayout>
+        </LinearLayout>
 
-            <!-- 配置引导条 -->
+        <!-- ==================== 直播互动参数 ====================
+             vc55：原来独立的「直播互动」页签只有 3 张参数卡，搬进来时合并压成这 1 张 8 行的卡
+             （570dp → 292dp）。每行统一「左标签 + 右控件」，分组标题与副文案全部去掉。
+             窄约束：卡内宽 272dp，第 2、8 行已占 212dp，不要再往行里加字。 -->
+        <LinearLayout
+            android:id="@+id/card_live_params"
+            style="@style/CardBox"
+            android:layout_marginTop="10dp">
+
+            <TextView
+                style="@style/TxtSection"
+                android:text="直播互动" />
+
+            <!-- 1. 进入方式 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:text="进入方式" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <TextView
+                    android:id="@+id/seg_enter_manual"
+                    style="@style/SegChip"
+                    android:text="手动进入" />
+
+                <TextView
+                    android:id="@+id/seg_enter_recommend"
+                    style="@style/SegChip"
+                    android:layout_marginStart="6dp"
+                    android:text="系统推荐" />
+            </LinearLayout>
+
+            <!-- 2. 评论间隔 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:text="评论间隔" />
+
+                <EditText
+                    android:id="@+id/et_comment_gap_min"
+                    style="@style/InputMini"
+                    android:layout_marginStart="6dp"
+                    android:text="5" />
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:layout_marginStart="6dp"
+                    android:text="~" />
+
+                <EditText
+                    android:id="@+id/et_comment_gap_max"
+                    style="@style/InputMini"
+                    android:layout_marginStart="6dp"
+                    android:text="15" />
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:layout_marginStart="6dp"
+                    android:text="秒" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+            </LinearLayout>
+
+            <!-- 3. 评论模式 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:text="评论模式" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <TextView
+                    android:id="@+id/seg_comment_copy"
+                    style="@style/SegChip"
+                    android:text="复制评论" />
+
+                <TextView
+                    android:id="@+id/seg_comment_preset"
+                    style="@style/SegChip"
+                    android:layout_marginStart="6dp"
+                    android:text="预设评论" />
+            </LinearLayout>
+
+            <!-- 4. 模式说明（随模式切换，单行省略） -->
+            <TextView
+                android:id="@+id/tv_comment_mode_desc"
+                style="@style/TxtHint"
+                android:layout_width="match_parent"
+                android:layout_marginTop="6dp"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="启动后将自动复制直播间中的最新评论并发送" />
+
+            <!-- 5. 自动申请连麦 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="10dp"
-                android:background="@drawable/bg_hint"
                 android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:paddingStart="10dp"
-                android:paddingTop="8dp"
-                android:paddingEnd="10dp"
-                android:paddingBottom="8dp">
+                android:orientation="horizontal">
 
                 <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="💡"
-                    android:textSize="12sp" />
+                    style="@style/TxtFieldLabel"
+                    android:text="自动申请连麦" />
 
-                <TextView
+                <Space
                     android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="6dp"
-                    android:layout_weight="1"
-                    android:text="评论参数请在「直播互动」页签配置"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="12sp" />
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/sw_mic_request"
+                    style="@style/AppSwitch" />
+            </LinearLayout>
+
+            <!-- 6. 评论时自动点赞 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
 
                 <TextView
-                    android:id="@+id/tv_go_config"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:clickable="true"
-                    android:focusable="true"
-                    android:text="去配置 ›"
-                    android:textColor="@color/warning_amber"
-                    android:textSize="12sp" />
+                    style="@style/TxtFieldLabel"
+                    android:text="评论时自动点赞" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/sw_like_on_comment"
+                    style="@style/AppSwitch"
+                    android:checked="true" />
             </LinearLayout>
+
+            <!-- 7. 点赞触发 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:text="点赞触发" />
+
+                <EditText
+                    android:id="@+id/et_like_trigger"
+                    style="@style/InputMini"
+                    android:layout_marginStart="6dp"
+                    android:text="3" />
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:layout_marginStart="6dp"
+                    android:text="条评论后" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+            </LinearLayout>
+
+            <!-- 8. 每次点赞个数 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:text="每次点赞" />
+
+                <EditText
+                    android:id="@+id/et_like_count_min"
+                    style="@style/InputMini"
+                    android:layout_marginStart="6dp"
+                    android:text="5" />
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:layout_marginStart="6dp"
+                    android:text="~" />
+
+                <EditText
+                    android:id="@+id/et_like_count_max"
+                    style="@style/InputMini"
+                    android:layout_marginStart="6dp"
+                    android:text="10" />
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:layout_marginStart="6dp"
+                    android:text="个" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+            </LinearLayout>
+
+            <!-- 直播互动是**独立流程**（与关注不同时跑）。原来靠「直播互动」页签的
+                 开始按钮触发，页签删掉后入口挪到这里，否则 M3 就彻底没法启动了。 -->
+            <TextView
+                android:id="@+id/tv_start_live"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="end"
+                android:text="只跑直播互动 ›"
+                android:textColor="@color/brand_red"
+                android:textSize="12sp" />
         </LinearLayout>
 
     </LinearLayout>

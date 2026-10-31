@@ -120,6 +120,22 @@
         <item name="android:background">@drawable/bg_segment_selected</item>
     </style>
 
+    <!-- 行内小胶囊：「进入方式  [手动进入][系统推荐]」这种「标题 + 两个选项同一行」的写法。
+         ⚠️ 不能直接用 SegItem —— 它是 width=0dp + weight=1，两个选项会被撑成半屏。
+         选中态同样由 bindSegmented 运行时设，不需要单独的 Selected 样式。 -->
+    <style name="SegChip">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">28dp</item>
+        <item name="android:paddingStart">10dp</item>
+        <item name="android:paddingEnd">10dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:textColor">@color/text_primary</item>
+        <item name="android:background">@drawable/bg_chip_normal</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+    </style>
+
     <!-- ============ 按钮（用 TextView 实现，避免 Button 的背景 tint 干扰） ============ -->
     <style name="BtnPrimary">
         <item name="android:layout_width">0dp</item>

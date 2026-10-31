@@ -290,9 +290,11 @@ class MainActivity : AppCompatActivity() {
     // ==================== 页签 ====================
 
     private fun setupTabs() {
-        tabs = listOf(binding.tabAuto, binding.tabNurture, binding.tabLive)
-        indicators = listOf(binding.indicatorAuto, binding.indicatorNurture, binding.indicatorLive)
-        pages = listOf(binding.contentAuto.root, binding.contentNurture.root, binding.contentLive.root)
+        // vc55：直播互动的 3 张参数卡并入「自动关注」页，页签从 3 个减到 2 个。
+        // ⚠️ 这里改数量后，全项目的 selectTab(2) 都必须清掉，否则 pages[2] 直接越界崩。
+        tabs = listOf(binding.tabAuto, binding.tabNurture)
+        indicators = listOf(binding.indicatorAuto, binding.indicatorNurture)
+        pages = listOf(binding.contentAuto.root, binding.contentNurture.root)
 
         tabs.forEachIndexed { index, tab ->
             tab.setOnClickListener { selectTab(index) }
@@ -322,8 +324,7 @@ class MainActivity : AppCompatActivity() {
     private fun setupPermissionCards() {
         val cards = listOf(
             binding.contentAuto.permCard,
-            binding.contentNurture.permCard,
-            binding.contentLive.permCard
+            binding.contentNurture.permCard
         )
         cards.forEach { card ->
             card.onPermissionClick = { kind -> openPermission(kind) }
@@ -342,8 +343,7 @@ class MainActivity : AppCompatActivity() {
             lastPermissionState = state
             listOf(
                 binding.contentAuto.permCard,
-                binding.contentNurture.permCard,
-                binding.contentLive.permCard
+                binding.contentNurture.permCard
             ).forEach { it.render(state) }
             LogStore.d(
                 TAG,
@@ -664,7 +664,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bindLive(s: Settings) {
-        val c = binding.contentLive
+        val c = binding.contentAuto
 
         bindSegmented(
             listOf(c.segEnterManual, c.segEnterRecommend), s.enterMode, grouped = false
@@ -1377,12 +1377,17 @@ class MainActivity : AppCompatActivity() {
 
         binding.fabMenu.setOnClickListener { showSelfCheckMenu() }
 
-        // 「去配置」「评论配置」都跳到直播互动页
-        binding.contentAuto.tvGoConfig.setOnClickListener {
-            selectTab(2)
-            toast("已切换到「直播互动」，评论参数在底部")
+        // 直播互动是独立流程（不同时跑关注）。原来由「直播互动」页签的「开始服务」触发，
+        // vc55 删页签后改成这张卡末尾的链接 —— 少了它 M3 就没有任何入口。
+        binding.contentAuto.tvStartLive.setOnClickListener { confirmLiveInteract() }
+
+        // 养号页的「评论配置 ›」：评论参数现在在自动关注页下半部分，切过去并滚到那张卡
+        binding.contentNurture.tvCommentConfig.setOnClickListener {
+            selectTab(0)
+            val scroll = binding.contentAuto.root
+            val card = binding.contentAuto.cardLiveParams
+            scroll.post { scroll.smoothScrollTo(0, card.top) }
         }
-        binding.contentNurture.tvCommentConfig.setOnClickListener { selectTab(2) }
     }
 
     // ==================== 引擎 ====================
@@ -1449,9 +1454,9 @@ class MainActivity : AppCompatActivity() {
             return
         }
         when (currentTab) {
-            TAB_AUTO -> confirmFollow()
             TAB_NURTURE -> confirmNurture()
-            TAB_LIVE -> confirmLiveInteract()
+            // 直播互动已不在页签里，入口是自动关注页那张卡的「只跑直播互动 ›」
+            else -> confirmFollow()
         }
     }
 
@@ -1779,10 +1784,8 @@ class MainActivity : AppCompatActivity() {
          */
         private const val MAX_DIGITS = 6
 
-        private val TAB_NAMES = listOf("自动关注", "养号助手", "直播互动")
+        private val TAB_NAMES = listOf("自动关注", "养号助手")
 
-        private const val TAB_AUTO = 0
         private const val TAB_NURTURE = 1
-        private const val TAB_LIVE = 2
     }
 }

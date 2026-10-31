@@ -190,30 +190,6 @@
                     android:background="@drawable/bg_tab_indicator"
                     android:visibility="invisible" />
             </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:gravity="center"
-                android:orientation="vertical">
-
-                <TextView
-                    android:id="@+id/tab_live"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="直播互动"
-                    android:textColor="@color/text_primary"
-                    android:textSize="14sp" />
-
-                <View
-                    android:id="@+id/indicator_live"
-                    android:layout_width="22dp"
-                    android:layout_height="3dp"
-                    android:layout_marginTop="5dp"
-                    android:background="@drawable/bg_tab_indicator"
-                    android:visibility="invisible" />
-            </LinearLayout>
         </LinearLayout>
 
         <View
@@ -234,11 +210,6 @@
             <include
                 android:id="@+id/content_nurture"
                 layout="@layout/content_nurture"
-                android:visibility="gone" />
-
-            <include
-                android:id="@+id/content_live"
-                layout="@layout/content_live"
                 android:visibility="gone" />
         </FrameLayout>
 
