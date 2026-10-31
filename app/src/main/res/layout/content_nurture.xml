@@ -1,4 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  养号助手 · 参数区（vc56 精简：993dp → 约 658dp，1.7 屏 → 1.12 屏）
+
+  三处主要省法：
+  1. 四个操作概率滑块由「label 独占一行 + 滑块一行」(80dp/项) 改成
+     「标签 + 滑块 + 百分比」一行 (48dp/项)，4 项省 128dp；
+  2. 三处说明文字从两行灰字改成 TxtHint 单行；
+  3. 运行时长与停留节奏都改内联一行（InputMini / SegChip）。
+
+  权限卡已删除：权限三点在默认页（自动关注）顶部可见，这里重复一遍只是占 77dp。
+  ⚠️ id 全部保持原样，bindNurture() 不需要改。
+-->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
@@ -16,12 +28,6 @@
         android:paddingEnd="12dp"
         android:paddingBottom="20dp">
 
-        <com.doujiajia.app.ui.PermissionCardView
-            android:id="@+id/perm_card"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="10dp" />
-
         <!-- ==================== 运行设置 ==================== -->
         <LinearLayout
             style="@style/CardBox"
@@ -31,56 +37,73 @@
                 style="@style/TxtSection"
                 android:text="运行设置" />
 
-            <TextView
-                style="@style/TxtFieldLabel"
-                android:layout_marginTop="14dp"
-                android:text="运行时长（分钟，1-1440）" />
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
 
-            <EditText
-                android:id="@+id/et_run_minutes"
-                style="@style/InputBox"
-                android:layout_marginTop="6dp"
-                android:text="60" />
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:text="运行时长" />
 
-            <TextView
-                style="@style/TxtFieldLabel"
-                android:layout_marginTop="14dp"
-                android:text="停留节奏（每条视频看多久）" />
+                <EditText
+                    android:id="@+id/et_run_minutes"
+                    style="@style/InputMini"
+                    android:layout_marginStart="6dp"
+                    android:text="60" />
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:layout_marginStart="6dp"
+                    android:text="分钟" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+            </LinearLayout>
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
+                android:gravity="center_vertical"
                 android:orientation="horizontal">
 
                 <TextView
+                    style="@style/TxtFieldLabel"
+                    android:text="停留节奏" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <TextView
                     android:id="@+id/seg_pace_slow"
-                    style="@style/SegItem"
-                    android:background="@drawable/bg_chip_normal"
+                    style="@style/SegChip"
                     android:text="慢" />
 
                 <TextView
                     android:id="@+id/seg_pace_normal"
-                    style="@style/SegItemSelected"
-                    android:layout_marginStart="8dp"
-                    android:background="@drawable/bg_segment_selected"
+                    style="@style/SegChip"
+                    android:layout_marginStart="6dp"
                     android:text="标准" />
 
                 <TextView
                     android:id="@+id/seg_pace_fast"
-                    style="@style/SegItem"
-                    android:layout_marginStart="8dp"
-                    android:background="@drawable/bg_chip_normal"
+                    style="@style/SegChip"
+                    android:layout_marginStart="6dp"
                     android:text="快" />
             </LinearLayout>
 
             <TextView
+                style="@style/TxtHint"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="标准节奏下每条约看 1.5～90 秒（多数 2～12 秒），慢/快分别把整体时长乘 1.6 / 0.6"
-                android:textColor="@color/text_tertiary"
-                android:textSize="11sp" />
+                android:layout_marginTop="6dp"
+                android:text="标准约 2~12 秒/条，慢 ×1.6、快 ×0.6" />
         </LinearLayout>
 
         <!-- ==================== 养号模式 ==================== -->
@@ -92,6 +115,7 @@
                 style="@style/TxtSection"
                 android:text="养号模式" />
 
+            <!-- 三个选项文字长短不一（5/4/4 字），chip 内联进标题行放不下，所以仍独占一行等分 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -121,23 +145,16 @@
 
             <TextView
                 android:id="@+id/tv_mode_desc"
+                style="@style/TxtHint"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:background="@drawable/bg_hint"
-                android:paddingStart="10dp"
-                android:paddingTop="9dp"
-                android:paddingEnd="10dp"
-                android:paddingBottom="9dp"
-                android:text="刷视频养号：自己上下滑推荐流，按随机节奏观看，命中标签时概率点赞"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
+                android:layout_marginTop="8dp"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="刷视频养号：自己上下滑推荐流，按随机节奏观看，命中标签时概率点赞" />
         </LinearLayout>
 
         <!-- ==================== 操作概率 ==================== -->
-        <LinearLayout
-            style="@style/CardBox"
-            android:layout_marginBottom="10dp">
+        <LinearLayout style="@style/CardBox">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -162,50 +179,165 @@
                     android:textSize="12sp" />
             </LinearLayout>
 
-            <!-- 点赞倾向（基线概率，命中标签会被放大） -->
+            <!-- 每项一行：标签 48dp + 滑块 weight=1（约 170dp）+ 百分比 38dp -->
             <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
+                android:layout_height="48dp"
+                android:layout_marginTop="8dp"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
                 <TextView
                     style="@style/TxtRowTitle"
+                    android:layout_width="48dp"
+                    android:text="点赞" />
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/slider_like"
                     android:layout_width="0dp"
+                    android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="点赞倾向（基线）" />
+                    android:stepSize="5"
+                    android:value="40"
+                    android:valueFrom="0"
+                    android:valueTo="60"
+                    app:haloColor="#26E1251B"
+                    app:labelBehavior="gone"
+                    app:thumbColor="@color/brand_red"
+                    app:tickVisible="false"
+                    app:trackColorActive="@color/brand_red"
+                    app:trackColorInactive="@color/switch_track_off" />
 
                 <TextView
                     android:id="@+id/tv_pct_like"
-                    android:layout_width="wrap_content"
+                    android:layout_width="38dp"
                     android:layout_height="wrap_content"
+                    android:gravity="end"
                     android:text="40%"
                     android:textColor="@color/brand_red"
                     android:textSize="13sp"
                     android:textStyle="bold" />
             </LinearLayout>
 
-            <com.google.android.material.slider.Slider
-                android:id="@+id/slider_like"
+            <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:stepSize="5"
-                android:value="40"
-                android:valueFrom="0"
-                android:valueTo="60"
-                app:haloColor="#26E1251B"
-                app:labelBehavior="gone"
-                app:thumbColor="@color/brand_red"
-                app:tickVisible="false"
-                app:trackColorActive="@color/brand_red"
-                app:trackColorInactive="@color/switch_track_off" />
+                android:layout_height="48dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
 
-            <!-- 文案标签加权 -->
+                <TextView
+                    style="@style/TxtRowTitle"
+                    android:layout_width="48dp"
+                    android:text="收藏" />
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/slider_collect"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:stepSize="5"
+                    android:value="15"
+                    android:valueFrom="0"
+                    android:valueTo="40"
+                    app:haloColor="#26E1251B"
+                    app:labelBehavior="gone"
+                    app:thumbColor="@color/brand_red"
+                    app:tickVisible="false"
+                    app:trackColorActive="@color/brand_red"
+                    app:trackColorInactive="@color/switch_track_off" />
+
+                <TextView
+                    android:id="@+id/tv_pct_collect"
+                    android:layout_width="38dp"
+                    android:layout_height="wrap_content"
+                    android:gravity="end"
+                    android:text="15%"
+                    android:textColor="@color/brand_red"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtRowTitle"
+                    android:layout_width="48dp"
+                    android:text="评论" />
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/slider_comment"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:stepSize="5"
+                    android:value="10"
+                    android:valueFrom="0"
+                    android:valueTo="40"
+                    app:haloColor="#26E1251B"
+                    app:labelBehavior="gone"
+                    app:thumbColor="@color/brand_red"
+                    app:tickVisible="false"
+                    app:trackColorActive="@color/brand_red"
+                    app:trackColorInactive="@color/switch_track_off" />
+
+                <TextView
+                    android:id="@+id/tv_pct_comment"
+                    android:layout_width="38dp"
+                    android:layout_height="wrap_content"
+                    android:gravity="end"
+                    android:text="10%"
+                    android:textColor="@color/brand_red"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtRowTitle"
+                    android:layout_width="48dp"
+                    android:text="转发" />
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/slider_share"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:stepSize="5"
+                    android:value="5"
+                    android:valueFrom="0"
+                    android:valueTo="40"
+                    app:haloColor="#26E1251B"
+                    app:labelBehavior="gone"
+                    app:thumbColor="@color/brand_red"
+                    app:tickVisible="false"
+                    app:trackColorActive="@color/brand_red"
+                    app:trackColorInactive="@color/switch_track_off" />
+
+                <TextView
+                    android:id="@+id/tv_pct_share"
+                    android:layout_width="38dp"
+                    android:layout_height="wrap_content"
+                    android:gravity="end"
+                    android:text="5%"
+                    android:textColor="@color/brand_red"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <!-- 文案标签加权：具体编辑在弹窗里，这里只显示概况 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
+                android:layout_marginTop="8dp"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
@@ -233,137 +365,17 @@
             </LinearLayout>
 
             <TextView
+                style="@style/TxtHint"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="视频文案命中标签时，点赞概率按「基线 × (1 + 加成)」放大，最高到 60%"
-                android:textColor="@color/text_tertiary"
-                android:textSize="11sp" />
-
-            <!-- 收藏概率 -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView
-                    style="@style/TxtRowTitle"
-                    android:layout_width="0dp"
-                    android:layout_weight="1"
-                    android:text="收藏概率" />
-
-                <TextView
-                    android:id="@+id/tv_pct_collect"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="15%"
-                    android:textColor="@color/brand_red"
-                    android:textSize="13sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <com.google.android.material.slider.Slider
-                android:id="@+id/slider_collect"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:stepSize="5"
-                android:value="15"
-                android:valueFrom="0"
-                android:valueTo="40"
-                app:haloColor="#26E1251B"
-                app:labelBehavior="gone"
-                app:thumbColor="@color/brand_red"
-                app:tickVisible="false"
-                app:trackColorActive="@color/brand_red"
-                app:trackColorInactive="@color/switch_track_off" />
-
-            <!-- 评论概率 -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView
-                    style="@style/TxtRowTitle"
-                    android:layout_width="0dp"
-                    android:layout_weight="1"
-                    android:text="评论概率" />
-
-                <TextView
-                    android:id="@+id/tv_pct_comment"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="10%"
-                    android:textColor="@color/brand_red"
-                    android:textSize="13sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <com.google.android.material.slider.Slider
-                android:id="@+id/slider_comment"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:stepSize="5"
-                android:value="10"
-                android:valueFrom="0"
-                android:valueTo="40"
-                app:haloColor="#26E1251B"
-                app:labelBehavior="gone"
-                app:thumbColor="@color/brand_red"
-                app:tickVisible="false"
-                app:trackColorActive="@color/brand_red"
-                app:trackColorInactive="@color/switch_track_off" />
-
-            <!-- 转发概率 -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <TextView
-                    style="@style/TxtRowTitle"
-                    android:layout_width="0dp"
-                    android:layout_weight="1"
-                    android:text="转发概率" />
-
-                <TextView
-                    android:id="@+id/tv_pct_share"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="5%"
-                    android:textColor="@color/brand_red"
-                    android:textSize="13sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <com.google.android.material.slider.Slider
-                android:id="@+id/slider_share"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:stepSize="5"
-                android:value="5"
-                android:valueFrom="0"
-                android:valueTo="40"
-                app:haloColor="#26E1251B"
-                app:labelBehavior="gone"
-                app:thumbColor="@color/brand_red"
-                app:tickVisible="false"
-                app:trackColorActive="@color/brand_red"
-                app:trackColorInactive="@color/switch_track_off" />
+                android:text="命中标签按加成放大点赞，上限 60%" />
 
             <TextView
+                style="@style/TxtHint"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="⚠ 为避免触发风控，点赞最多 60%，其余每项最多 40%"
-                android:textColor="@color/warning_amber"
-                android:textSize="11sp" />
+                android:text="⚠ 点赞最多 60%，其余每项最多 40%"
+                android:textColor="@color/warning_amber" />
         </LinearLayout>
 
     </LinearLayout>

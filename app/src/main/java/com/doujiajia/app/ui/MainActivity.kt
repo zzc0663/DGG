@@ -322,16 +322,12 @@ class MainActivity : AppCompatActivity() {
     // ==================== 权限卡片 ====================
 
     private fun setupPermissionCards() {
-        val cards = listOf(
-            binding.contentAuto.permCard,
-            binding.contentNurture.permCard
-        )
-        cards.forEach { card ->
-            card.onPermissionClick = { kind -> openPermission(kind) }
-            card.onKeepAliveClick = {
-                LogStore.i(TAG, "跳转「忽略电池优化」白名单设置")
-                AppPermissions.openBatteryOptimizationSettings(this)
-            }
+        // vc56 起只剩「自动关注」页一张：养号页那张纯属重复（77dp），已随页面精简删除。
+        val card = binding.contentAuto.permCard
+        card.onPermissionClick = { kind -> openPermission(kind) }
+        card.onKeepAliveClick = {
+            LogStore.i(TAG, "跳转「忽略电池优化」白名单设置")
+            AppPermissions.openBatteryOptimizationSettings(this)
         }
     }
 
@@ -341,10 +337,7 @@ class MainActivity : AppCompatActivity() {
         // 无条件打日志会把日志文件刷满，无条件重画也会和用户点按抢主线程。
         if (state != lastPermissionState) {
             lastPermissionState = state
-            listOf(
-                binding.contentAuto.permCard,
-                binding.contentNurture.permCard
-            ).forEach { it.render(state) }
+            binding.contentAuto.permCard.render(state)
             LogStore.d(
                 TAG,
                 "权限状态：无障碍=${state.accessibility} 悬浮窗=${state.overlay} " +
