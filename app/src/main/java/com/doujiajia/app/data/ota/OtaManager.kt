@@ -1,6 +1,7 @@
 package com.doujiajia.app.data.ota
 
 import android.content.Context
+import com.doujiajia.app.BuildConfig
 import com.doujiajia.app.data.LogStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,7 +23,14 @@ sealed class OtaState {
 
     /** 已下载且校验通过，等用户点安装（P2 才接安装器） */
     data class Ready(val file: File, val manifest: OtaManifest) : OtaState()
-    data class Failed(val message: String) : OtaState()
+
+    /**
+     * @param url 手工下载用的**永久直链**（见 [directDownloadUrl]）。
+     *   带上它是为了让界面能给出「用浏览器下载」这条出路 —— 校验类失败（签名读不出来）
+     *   在**已经装坏代码的设备**上是死循环：客户端连试 N 轮都过不了，只能手动装一次新包才自救。
+     *   2026-10-31 的 R-20261031-DAFA78 就是这样。
+     */
+    data class Failed(val message: String, val url: String? = null) : OtaState()
 }
 
 /**
@@ -137,7 +145,7 @@ object OtaManager {
                 _state.value = OtaState.Downloading(done, total)
             }.getOrElse { e ->
                 LogStore.e(TAG, "下载失败：${e.message}")
-                _state.value = OtaState.Failed(e.message ?: "下载失败")
+                _state.value = OtaState.Failed(e.message ?: "下载失败", directDownloadUrl(manifest))
                 return Result.failure(e)
             }
 
@@ -158,16 +166,26 @@ object OtaManager {
                     // 校验不过的包立刻删掉：既省空间，也避免被误当成"已下载完成"
                     file.delete()
                     OtaStore.get(context).clearReady()
-                    _state.value = OtaState.Failed(verify.reason)
+                    _state.value = OtaState.Failed(verify.reason, directDownloadUrl(manifest))
                     LogStore.e(TAG, "校验拒绝：${verify.reason}")
                     Result.failure(IllegalStateException(verify.reason))
                 }
             }
         }
 
+    /**
+     * 手工下载用的永久直链。
+     *
+     * **不能用 `manifest.url`**：那是带 token 的下载接口，服务端签发的有效期只有 10 分钟，
+     * 用户看到「升级失败」后过一会儿再点就 403，等于给了一个坏按钮。
+     * 我们每次发布会把同一个包复制到 `public/dl/` 下，命名固定为
+     * `doujiajia-<versionName>-vc<versionCode>.apk`，这条地址永久有效。
+     */
+    private fun directDownloadUrl(m: OtaManifest): String =
+        BuildConfig.API_BASE_URL.trimEnd('/') + "/dl/doujiajia-${m.versionName}-vc${m.versionCode}.apk"
+
     /** 用户点了「忽略此版本」：持久化到该版本为止，更高的版本仍会提示 */
-    fun ignoreVersion(context: Context, versionCode: Int) {
-        LogStore.i(TAG, "用户忽略版本 $versionCode")
+    fun ignoreVersion(context: Context, versionCode: Int) {        LogStore.i(TAG, "用户忽略版本 $versionCode")
         OtaStore.get(context).ignoredVersionCode = versionCode
         _state.value = OtaState.Idle
     }

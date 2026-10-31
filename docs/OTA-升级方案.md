@@ -166,20 +166,36 @@ if (!sameSigners(mine, theirs)) return Rejected("签名与当前应用不一致�
 if (versionCodeOf(archive) <= currentVersionCode) return Rejected("版本号未递增")
 ```
 
-### 5.1 签名读取踩过的三个坑（按时间，都是线上/真机事故）
+### 5.1 签名读取踩过的坑（按时间，每条都是线上/真机事故）
 
 | # | 现象 | 根因 | 修法 |
 |---|---|---|---|
 | 1 | `NoSuchMethodError: PackageInfoFlags.of` | `PackageInfoFlags.of` 是 **API 33** 才有的，却按 `SDK >= P` 判断 | 分界改 33（`TIRAMISU`），32 及以下走 int flags |
 | 2 | API < 28 报「安装包没有签名」 | AGP 在 minSdk≥24 时默认只签 v2，旧系统只能读 v1（JAR）签名 | 构建时 `enableV1Signing = true` |
-| 3 | API 28~32 报「读不到下载包的签名」 | `getPackageArchiveInfo` 读**未安装的 APK 文件**时**不填 `signingInfo`**（只有已安装应用的 `PackageInfo` 才有） | `fetchSigners()` 读到空就换 `GET_SIGNATURES` 再读一次；另补 `enableV3Signing` |
+| 3 | API 28~32 报「读不到下载包的签名」 | `getPackageArchiveInfo` 读**未安装的 APK 文件**时**不填 `signingInfo`**（只有已安装应用的 `PackageInfo` 才有） | 本意是回退 `GET_SIGNATURES`，但**写错了**（见第 4 条）；同时补 `enableV3Signing` |
+| 4 | 第 3 条的修法上线后，同一台 Android 10 **照样失败**，日志变成「两种读法都读不到」 | 回退写成 `archiveInfo(pm, target)`，走默认参数 `flags = infoFlags()` ⇒ API 28+ 仍是 `GET_SIGNING_CERTIFICATES`。**同一把钥匙开同一把锁**，读的是同一份空 `signingInfo`；再取 `info.signatures` 自然是 null | `fetchSigners()` 三路：①`signingInfo` ②**显式传 `legacyFlags()`** 重读 ③直接解 zip 读 `META-INF` 下 `.RSA` 的 PKCS#7 证书 |
 
-第 3 条代价最大：**vc41~vc52 在 Android 9~12L（API 28~32）上 OTA 全部失效** ——
-日志 `R-20261030-445040`，一台 Android 10 设备从 1.4.11 升最新版连试 5 轮全挂，
-每次都报「安装包没有签名」。主测机是 Android 17，所以这个洞一直没暴露。
+第 3 条的代价：**vc41~vc52 在 Android 9~12L（API 28~32）上 OTA 全部失效** ——
+日志 `R-20261030-445040`，一台 Android 10 设备从 1.4.11 升最新版连试 5 轮全挂。
 
-⚠️ **已装在设备上的坏版本救不回来**（校验代码在旧包里），只能手动装一次 vc53 及以上。
-补签 v3 只是给老设备一个"也许能直接读到"的机会，别指望它一定生效。
+第 4 条的代价：**vc53~vc56 仍在这些设备上失效** —— 日志 `R-20261031-DAFA78`，
+同一台安卓 10（已升到 vc53）再试 4 轮，每轮都下完 4 713 125 字节后报
+`两种读法都读不到下载包签名（API 29；GET_SIGNING_CERTIFICATES 与 GET_SIGNATURES 均返回空）`。
+**这句文案本身是错的**：只有一种读法，跑了两遍。
+
+⚠️ 教训：**注释里写"两种读法都试过了"之前，先确认两次调用传的参数真的不同。**
+默认参数是这类 bug 的温床 —— 换读法必须显式传 flags，不要依赖 `= infoFlags()` 这种默认值。
+
+第 3 路（直读 zip）为什么必须有：前两路都依赖 framework 对「未安装 APK」的签名解析，
+而这块行为在 API 28~32（不填 signingInfo）、API 30+（对 targetSdk≥30 停用 GET_SIGNATURES）
+各不一样，且没有稳定的文档。第 3 路只认 zip 结构，与 API 级别、targetSdk 都无关。
+它只认 v1 签名（v2/v3 存在 APK Signing Block 里，不是 zip 条目），但这正好与已安装应用
+`GET_SIGNATURES` 的证书同源；本仓库实测两个不同版本构建出的包，读出的证书
+SHA-256 都是 `59:92:7D:81…:8D`，与 `keytool -printcert -jarfile`、`apksigner --print-certs` 三方一致。
+
+⚠️ **已装在设备上的坏版本救不回来**（校验代码在旧包里），只能手动装一次。vc57 起
+升级失败会弹窗给出「用浏览器下载」按钮（指向 `public/dl/` 的永久直链，不是 10 分钟有效的
+token 链接），用户点一下就能装。补签 v3 只是给老设备一个"也许能直接读到"的机会，别指望它一定生效。
 
 另外：
 

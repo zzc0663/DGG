@@ -1151,7 +1151,9 @@ class MainActivity : AppCompatActivity() {
             is OtaState.Failed -> {
                 binding.tvUpdate.visibility = View.VISIBLE
                 binding.tvUpdate.text = "重试升级"
-                binding.tvUpdate.setOnClickListener { checkOta(manual = true) }
+                // 不再直接重试：校验类失败（读不出签名）重试一万次也是一样的结果，
+                // 必须给一条「用浏览器下载、手动装一次」的出路，否则设备就卡死在旧版上了。
+                binding.tvUpdate.setOnClickListener { showOtaFailedDialog(state) }
                 LogStore.w(TAG, "OTA 失败：${state.message}")
             }
 
@@ -1162,6 +1164,41 @@ class MainActivity : AppCompatActivity() {
         }
         // 最后赋值：上面的 Ready 分支要读「上一个状态」判断是不是刚下完
         lastOtaState = state
+    }
+
+    /**
+     * 升级失败后的出口。
+     *
+     * 为什么不是简单地「再试一次」：签名读不出来这类失败是**确定性的**——同一台设备、同一个包，
+     * 重试 4 次的结果完全一样（日志 R-20261031-DAFA78 连试 4 轮全挂）。真正能让设备脱困的
+     * 只有「手动装一个新包」，因为修好的代码在新包里，旧包装不了新包就永远走不到修复。
+     */
+    private fun showOtaFailedDialog(state: OtaState.Failed) {
+        if (isFinishing || updateDialog?.isShowing == true) return
+        val url = state.url?.takeIf { it.isNotBlank() }
+        val builder = AlertDialog.Builder(this)
+            .setTitle("升级失败")
+            .setMessage(
+                PromptText.of(
+                    buildString {
+                        append(state.message)
+                        if (url != null) {
+                            append("\n\n**如果反复失败**：用浏览器下载安装包，手动安装一次。")
+                            append("装好之后走的就是修好的版本，以后 OTA 自动升级会恢复正常。")
+                        }
+                    }
+                )
+            )
+            .setNegativeButton("重试") { _, _ -> checkOta(manual = true) }
+        if (url != null) {
+            builder.setPositiveButton("用浏览器下载") { _, _ ->
+                LogStore.i(TAG, "OTA 失败后改用浏览器下载：$url")
+                runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                    .onFailure { toast("无法打开浏览器：$url") }
+            }
+        }
+        builder.setNeutralButton("关闭", null)
+        updateDialog = builder.show()
     }
 
     /**
