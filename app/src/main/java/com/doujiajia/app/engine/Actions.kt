@@ -45,6 +45,10 @@ class Actions(
 
     /**
      * 在 [root] 子树里按 [target] 查找节点。IMAGE 类型在 M1 恒不命中（图像通道 M2 接入）。
+     *
+     * [Target.Kind.VIEW_ID] 走**快路径**（一次 IPC，3~14ms）：全树 BFS 在直播间要 5~7 秒，
+     * 每轮发评论都跑一遍等于把间隔从秒级拖到分钟级。快路径没命中（抖音改版换了混淆 id）
+     * 才退回遍历 —— 这是保底而不是常态，命中率掉的证据是下面那条 debug 日志。
      */
     fun find(target: Target, root: AccessibilityNodeInfo? = root()): AccessibilityNodeInfo? {
         if (target.kind == Target.Kind.IMAGE) {
@@ -52,7 +56,29 @@ class Actions(
             return null
         }
         val start = root ?: return null
+        if (target.kind == Target.Kind.VIEW_ID) {
+            nodesByViewId(target.value, start).firstOrNull { isOnScreen(it) }?.let { return it }
+            LogStore.d(TAG, "viewId 快路径未命中 $target（抖音改版？），转全树遍历")
+        }
         return findBy(start) { node -> matches(node, target) && isOnScreen(node) }
+    }
+
+    /**
+     * 依次尝试多个候选定位，返回**第一个**命中的节点。
+     *
+     * 专为「快路径 + 兜底」配：viewId 混淆串会随抖音版本变，只配它等于把整个流程
+     * 绑死在一个版本号上；反过来只用文本定位又要在直播间跑 5~7 秒的全树。
+     * 所以调用方传 `[viewId, textContains]`，命中第一个就算数，
+     * 抖音改版改掉 id 只是慢一点，不会直接跑不了。
+     *
+     * ⚠️ [root] 的默认值只求一次窗口根节点，不会因为候选多而重复 IPC。
+     */
+    fun findAny(candidates: List<Target>, root: AccessibilityNodeInfo? = root()): AccessibilityNodeInfo? {
+        val start = root ?: return null
+        candidates.forEach { target ->
+            find(target, start)?.let { return it }
+        }
+        return null
     }
 
     // ==================== 节点快照（一次遍历，多处复用） ====================
@@ -209,6 +235,10 @@ class Actions(
             Target.Kind.DESC -> facts.desc == target.value
             Target.Kind.DESC_CONTAINS -> facts.desc?.contains(target.value) == true
             Target.Kind.ID -> facts.id == target.value
+            // 与 [matches] 同一套语义：value 是**裸资源名**，而树里读出来的是 `pkg:id/h7l`
+            Target.Kind.VIEW_ID -> facts.id?.let { raw ->
+                raw == target.value || raw.substringAfterLast(':') == target.value
+            } ?: false
             Target.Kind.EDITABLE -> facts.editable
             Target.Kind.IMAGE -> false
         }
@@ -228,8 +258,14 @@ class Actions(
             LogStore.d(TAG, "图像通道未启用（M2 之后），跳过收集 $target")
             return emptyList()
         }
-        val start = root ?: root() ?: return emptyList()
         val result = ArrayList<AccessibilityNodeInfo>(max)
+        // VIEW_ID 同样先走快路径：一次 IPC 就能拿到全部同 id 节点（直播评论行正是这种用法）
+        if (target.kind == Target.Kind.VIEW_ID) {
+            val top = root ?: root() ?: return emptyList()
+            val quick = nodesByViewId(target.value, top).filter { isOnScreen(it) }.take(max)
+            if (quick.isNotEmpty()) return result.apply { addAll(quick) }
+        }
+        val start = root ?: root() ?: return emptyList()
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.addLast(start)
         var visited = 0
@@ -276,10 +312,38 @@ class Actions(
      * 直播间的评论输入框，无障碍树里「说点什么」这句占位提示和真正的 EditText 可能不是同一个节点，
      * 用 textContains("说点什么") 命中的往往是提示 TextView，对它 SET_TEXT 必然失败。
      * 所以点完输入区后按 `isEditable` 重新找一次真正的输入框。
+     *
+     * ⚠️ 这是**全树遍历**，直播播放中要 5~7 秒。新写的流程请优先用 [findInputEdit]，
+     * 只有在「焦点还没进来」的冷场景才退回这里。
      */
     fun findEditable(root: AccessibilityNodeInfo? = null): AccessibilityNodeInfo? {
         val start = root ?: root() ?: return null
         return findBy(start) { node -> node.isEditable && isOnScreen(node) }
+    }
+
+    /**
+     * 当前持有**输入焦点**的可编辑节点（一次 IPC，拿不到就 null）。
+     *
+     * ⚠️ 这里刻意**不做全树兜底**：它要回答的问题是「面板有没有收起来」，
+     * 而收起来的表现恰恰就是「屏上没有输入焦点」。一旦兜底去按 `isEditable` 全树找，
+     * 就会在任何地方找到一个编辑框 → 答案永远是「没收起」，这条证据彻底失效，还要付 5~7 秒。
+     */
+    fun focusedEditable(root: AccessibilityNodeInfo? = null): AccessibilityNodeInfo? {
+        val start = root ?: root() ?: return null
+        return runCatching { start.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) }.getOrNull()
+            ?.takeIf { it.isEditable && isOnScreen(it) }
+    }
+
+    /**
+     * 找已经拿到焦点的输入控件（一次 IPC 优先，没有焦点才退回全树）。
+     *
+     * 点过输入框之后，正确的做法是先问「现在谁有输入焦点」——framework 直接给答案。
+     * 只有在没有焦点（输入法刚起来、焦点还没给到）时才退回 [findEditable] 的全树遍历。
+     */
+    fun findInputEdit(root: AccessibilityNodeInfo? = null): AccessibilityNodeInfo? {
+        val start = root ?: root() ?: return null
+        focusedEditable(start)?.let { return it }
+        return findEditable(start)
     }
 
     /** 节点在屏幕上的矩形；无有效 bounds 时返回空 Rect（宽高为 0） */
@@ -324,6 +388,11 @@ class Actions(
             Target.Kind.DESC -> descOf(node) == target.value
             Target.Kind.DESC_CONTAINS -> descOf(node)?.contains(target.value) == true
             Target.Kind.ID -> node.viewIdResourceName == target.value
+            // value 是裸资源名（`h7l`），树里读到的是 `com.ss.android.ugc.aweme:id/h7l`。
+            // 两种写法都接受：uiautomator dump 出来的是裸名，手抄配置时也可能带包名。
+            Target.Kind.VIEW_ID -> node.viewIdResourceName?.let { raw ->
+                raw == target.value || raw.substringAfterLast(':') == target.value
+            } ?: false
             Target.Kind.EDITABLE -> node.isEditable
             Target.Kind.IMAGE -> false
         }
@@ -491,11 +560,19 @@ class Actions(
      * 比自己用 Kotlin BFS 一节点一节点问要快数倍——「关注后 1 秒内完成下滑」全靠这一步。
      * 找不到（抖音改版换了混淆 id）返回 null，调用方必须留遍历兜底。
      */
-    fun findByViewId(id: String): AccessibilityNodeInfo? {
-        val start = root() ?: return null
+    fun findByViewId(id: String, rootHint: AccessibilityNodeInfo? = null): AccessibilityNodeInfo? =
+        nodesByViewId(id, rootHint).firstOrNull { isOnScreen(it) }
+
+    /**
+     * 按 view id 取**全部**同名节点的原生结果（不判屏内外）。
+     *
+     * 与 [findByViewId] 分开是为了让「要多个命中」的场景（采集评论行）也吃这一次 IPC，
+     * 而不是因只取第一个再回头跑全树。
+     */
+    fun nodesByViewId(id: String, rootHint: AccessibilityNodeInfo? = null): List<AccessibilityNodeInfo> {
+        val start = rootHint ?: root() ?: return emptyList()
         val full = if (id.contains(":id/")) id else (start.packageName?.toString() ?: "") + ":id/" + id
-        val nodes = runCatching { start.findAccessibilityNodeInfosByViewId(full) }.getOrNull()
-        return nodes?.firstOrNull { isOnScreen(it) }
+        return runCatching { start.findAccessibilityNodeInfosByViewId(full) }.getOrNull().orEmpty()
     }
 
     /**
@@ -764,7 +841,13 @@ class Actions(
         return ok
     }
 
-    /** 轮询等待目标出现，超时返回 null（由上层决定是否重试） */
+    /**
+     * 轮询等待目标出现，超时返回 null（由上层决定是否重试）。
+     *
+     * @param candidates [Target] 或 [List]<[Target]>（一组「快路径 + 兜底」）。
+     *   传单个 Target 时与旧行为一致，用 [find]；
+     *   传 List 时用 [findAny]，让每轮轮询先走廉价的 viewId 通道再说。
+     */
     suspend fun waitFor(
         target: Target,
         timeoutMs: Long,
@@ -773,6 +856,20 @@ class Actions(
         val deadline = SystemClock.uptimeMillis() + timeoutMs
         while (SystemClock.uptimeMillis() < deadline) {
             find(target)?.let { return it }
+            delay(pollMs)
+        }
+        return null
+    }
+
+    /** [waitFor] 的多候选版本，语义同 [findAny] */
+    suspend fun waitForFirst(
+        candidates: List<Target>,
+        timeoutMs: Long,
+        pollMs: Long = 200
+    ): AccessibilityNodeInfo? {
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        while (SystemClock.uptimeMillis() < deadline) {
+            findAny(candidates)?.let { return it }
             delay(pollMs)
         }
         return null
@@ -826,7 +923,7 @@ class Actions(
         }
     }
 
-    private fun textOf(node: AccessibilityNodeInfo): String? =
+    fun textOf(node: AccessibilityNodeInfo): String? =
         node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
 
     private fun descOf(node: AccessibilityNodeInfo): String? =

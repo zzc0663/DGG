@@ -2,10 +2,12 @@ package com.doujiajia.app.engine.flow
 
 import android.graphics.Rect
 import android.os.SystemClock
+import com.doujiajia.app.data.InteractStore
 import com.doujiajia.app.data.LogStore
 import com.doujiajia.app.data.RoomStore
 import com.doujiajia.app.data.PresetComments
 import com.doujiajia.app.data.Settings
+import com.doujiajia.app.data.SettingsStore
 import com.doujiajia.app.engine.Flow
 import com.doujiajia.app.engine.FlowAbortException
 import com.doujiajia.app.engine.FlowContext
@@ -27,6 +29,12 @@ import kotlinx.coroutines.delay
  *    并且剔除系统提示、超长内容和重复内容；
  * 2. **命中「评论过快」一类提示立刻停机且不重试**——继续试只会把限流升级成封号；
  * 3. 连麦**只申请一次**。反复申请是这个直播间里最扎眼的异常行为。
+ *
+ * vc60 起补上**安全阀**（此前这个循环是 `while (true)`，只有报错或手动停才退出）：
+ * 本轮目标 / 每日上限 / 定条数休息三项都在 [InteractStore] 记账，
+ * 且像 M2 一样**每轮重读设置**，面板上改了立刻生效。
+ * 之前「跑起来就不知道什么时候停」是实际用过的人才提得出来的问题——直播间没人说话时
+ * 它会一路发下去，发到被平台限流为止。
  */
 class LiveInteractFlow : Flow {
 
@@ -55,13 +63,6 @@ class LiveInteractFlow : Flow {
             }
         }
 
-        if (settings.enterMode != ENTER_MANUAL) {
-            // 系统推荐进入要「回首页 → 在推荐流里识别直播卡片 → 点进去」，需要直播卡片的定位特征，
-            // 这一版没有校准，做出来就是猜。宁可明确告诉用户，也不假装支持。
-            LogStore.w(TAG, "进入方式选择的是「系统推荐」，本版本仅支持手动进入，按手动模式继续")
-            ctx.publish(message = "本版本只支持手动进入直播间，按当前位置继续")
-        }
-
         val detection = ctx.detector.detect()
         if (detection.page != PageState.LIVE_ROOM) {
             throw FlowAbortException(
@@ -77,11 +78,23 @@ class LiveInteractFlow : Flow {
             )
         }
 
-        ctx.publish(counterLabel = "已发评论", followed = 0, target = 0, message = "准备就绪")
+        val store = InteractStore.get(ctx.appContext)
+        val remaining = store.remainingToday(settings.commentDailyLimit)
+        if (remaining <= 0) {
+            throw FlowAbortException(
+                "今日评论已达上限 ${settings.commentDailyLimit}（已发 ${store.todayCount()} 条），明天再跑"
+            )
+        }
+
+        // 目标与 M2 同口径：**每轮重读**（悬浮面板上改的立刻生效），启动时只校验一次额度。
+        var target = minOf(settings.commentTarget.coerceAtLeast(1), remaining)
+        ctx.publish(counterLabel = "已发评论", followed = 0, target = target, message = "准备就绪")
         LogStore.i(
             TAG,
-            "开始：间隔 ${settings.commentGapMin}~${settings.commentGapMax}s，" +
-                "评论模式 ${if (settings.commentMode == COMMENT_PRESET) "预设(${presets.size}条)" else "复制最新"}" +
+            "开始：本轮目标 $target 条（界面设置 ${settings.commentTarget} / 今日剩余 $remaining）" +
+                "，间隔 ${settings.commentGapMin}~${settings.commentGapMax}s" +
+                "，模式 ${if (settings.commentMode == COMMENT_PRESET) "预设(${presets.size}条)" else "复制最新"}" +
+                "，每 ${settings.commentRestAfterN} 条休息 ${settings.commentRestSeconds}s" +
                 "，自动点赞 ${if (settings.likeOnComment) "每 ${settings.likeTrigger} 条" else "关闭"}"
         )
 
@@ -90,12 +103,54 @@ class LiveInteractFlow : Flow {
         var sinceLike = 0
         var failures = 0
         var micTried = false
-        var lastComment = ""
 
-        while (true) {
+        /**
+         * 最近发过的评论。是**窗口**不是单个 `lastComment`：
+         * 真机基线（`R-20261031-184122`）97 秒发 6 条，同一句出现 3 次——
+         * 「不跟上一条重复」挡不住 A-B-A-B 这种交替，观感上就是机器在刷同一句。
+         */
+        val recent = ArrayDeque<String>(RECENT_WINDOW + 1)
+
+        /**
+         * 本轮用的设置快照，每轮从 [SettingsStore] 重取。
+         *
+         * UI 参数的 class 意义上全是快照——用户在悬浮面板上改的**数值**（间隔、点赞次数、
+         * 要不要休息）以前要停止任务再启动才生效。这里跟 M2 关注流程对齐：每轮开头刷新一次。
+         */
+        var st = settings
+
+        /** 只认「这两个字段变了」——拿会自然递减的 `remainingToday` 比会导致每轮都误报 */
+        var lastSeenTarget = settings.commentTarget
+        var lastSeenDailyLimit = settings.commentDailyLimit
+
+        while (sent < target) {
             if (ctx.stopped()) return
             ctx.awaitResume()
             ctx.guard()
+
+            // 实时目标与上限：改小到已达标就自然结束，改大继续跑
+            val fresh = SettingsStore.get(ctx.appContext).current
+            if (fresh.commentTarget != lastSeenTarget || fresh.commentDailyLimit != lastSeenDailyLimit) {
+                lastSeenTarget = fresh.commentTarget
+                lastSeenDailyLimit = fresh.commentDailyLimit
+                val remainingNow = store.remainingToday(fresh.commentDailyLimit)
+                if (remainingNow <= 0) {
+                    LogStore.i(
+                        TAG,
+                        "每日上限已调为 ${fresh.commentDailyLimit}，今日已发 ${store.todayCount()} 条，停止"
+                    )
+                    ctx.publish(message = "已达每日上限 ${fresh.commentDailyLimit}")
+                    break
+                }
+                val newTarget = minOf(fresh.commentTarget.coerceAtLeast(1), remainingNow)
+                if (newTarget != target) {
+                    LogStore.i(TAG, "本轮目标已从 $target 调整为 $newTarget（界面实时修改）")
+                    target = newTarget
+                    ctx.publish(target = target, message = "本轮目标已改为 $newTarget 条")
+                }
+                if (sent >= target) break
+            }
+            st = fresh
 
             if (!ensureLiveRoom(ctx)) {
                 throw FlowAbortException(
@@ -104,15 +159,14 @@ class LiveInteractFlow : Flow {
                 )
             }
 
-
             // 连麦只试一次：反复申请比不申请危险得多
-            if (settings.micRequest && !micTried) {
+            if (st.micRequest && !micTried) {
                 micTried = true
                 tryApplyMic(ctx, targets)
             }
 
-            val comment = buildComment(ctx, targets, settings, presets, lastComment)
-            if (comment == null) {
+            val draft = buildComment(ctx, targets, st, presets, recent)
+            if (draft == null) {
                 failures++
                 ctx.publish(message = "拿不到可发的评论内容（$failures/$MAX_CONTENT_FAILS）")
                 if (failures >= MAX_CONTENT_FAILS) {
@@ -124,7 +178,7 @@ class LiveInteractFlow : Flow {
                         ctx,
                         "连续 $MAX_CONTENT_FAILS 次拿不到可发的评论内容"
                     ) {
-                        if (buildComment(ctx, targets, settings, presets, lastComment) != null) 1 else 0
+                        if (buildComment(ctx, targets, st, presets, recent) != null) 1 else 0
                     }
                     if (!recovered) return
                     continue
@@ -132,21 +186,43 @@ class LiveInteractFlow : Flow {
                 ctx.settle(RETRY_WAIT_MS)
                 continue
             }
+            val comment = draft.text
 
-            if (!waitBeforeComment(ctx, settings)) return
+            if (!waitBeforeComment(ctx, st)) return
 
             if (sendComment(ctx, targets, comment)) {
                 sent++
                 sinceLike++
-                lastComment = comment
+                rememberSent(recent, comment)
                 failures = 0
-                ctx.publish(followed = sent, message = "已发评论 $sent 条")
-                LogStore.i(TAG, "已发评论 #$sent：「$comment」")
+                val todayCount = store.bumpToday()
+                ctx.publish(followed = sent, target = target, message = "已发评论 $sent/$target 条")
+                LogStore.i(
+                    TAG,
+                    "已发评论 #$sent/$target：「$comment」（今日 $todayCount/${st.commentDailyLimit}）"
+                )
+                if (draft.fromFallback) {
+                    ctx.publish(message = "复制模式没抄到可用正文，本条用的是预设话术")
+                }
 
-                if (settings.likeOnComment && sinceLike >= settings.likeTrigger.coerceAtLeast(1)) {
-                    likes += likeBurst(ctx, settings)
+                if (st.likeOnComment && sinceLike >= st.likeTrigger.coerceAtLeast(1)) {
+                    likes += likeBurst(ctx, st)
                     sinceLike = 0
-                    ctx.publish(followed = sent, message = "已发评论 $sent 条 · 已点赞 $likes 次")
+                    ctx.publish(
+                        followed = sent,
+                        target = target,
+                        message = "已发评论 $sent/$target 条 · 已点赞 $likes 次"
+                    )
+                }
+
+                // 定条数休息：评论比关注更容易触发频控，这里的休息是**节奏**不是点缀。
+                // 休息前不主动刷新评论区——发评论不像关注那样依赖列表位置。
+                if (st.restComment && st.commentRestAfterN > 0 &&
+                    sent % st.commentRestAfterN == 0 && sent < target
+                ) {
+                    LogStore.i(TAG, "到达休息点（每 ${st.commentRestAfterN} 条），休息 ${st.commentRestSeconds}s")
+                    ctx.publish(message = "已发 $sent 条，按设置休息 ${st.commentRestSeconds}s")
+                    if (!waitRest(ctx, st.commentRestSeconds * 1_000L)) return
                 }
             } else {
                 failures++
@@ -161,6 +237,13 @@ class LiveInteractFlow : Flow {
                 ctx.settle(RETRY_WAIT_MS)
             }
         }
+
+        ctx.publish(message = "已达本轮目标 $target 条评论")
+        LogStore.i(
+            TAG,
+            "本轮完成：发评论 $sent 条，达目标 $target 条" +
+                "（今日累计 ${store.todayCount()} 条，点赞 $likes 次）"
+        )
     }
 
     // ==================== 前置与环境 ====================
@@ -194,34 +277,57 @@ class LiveInteractFlow : Flow {
     /**
      * 生成这一轮要发的评论。
      *
-     * - 预设模式：从话术库里随机挑，尽量不连续发同一句；
+     * - 预设模式：从话术库里随机挑，避开 [recent] 窗口里发过的句子；
      * - 复制模式：取直播间**最新**一条别人的评论正文——注意是取正文不是整行，
      *   否则会把自己的昵称一起发出去，等于自曝。
+     *
+     * [fromFallback] 是给界面看的：复制模式拿不到正文时会改发预设话术，
+     * 这件事以前只写进日志，用户看到的是「互动在正常跑，但发的全是自己库存的话」。
      */
+    private class Draft(val text: String, val fromFallback: Boolean)
+
     private fun buildComment(
         ctx: FlowContext,
         targets: LiveTargets,
         settings: Settings,
         presets: List<String>,
-        lastComment: String
-    ): String? = when (settings.commentMode) {
-        COMMENT_PRESET -> {
-            val pool = presets.filter { it != lastComment }.ifEmpty { presets }
-            if (pool.isEmpty()) null else pool.random()
-        }
+        recent: Collection<String>
+    ): Draft? = when (settings.commentMode) {
+        COMMENT_PRESET -> pickPreset(presets, recent)?.let { Draft(it, false) }
 
-        else -> copyLatestComment(ctx, targets, lastComment) ?: run {
+        else -> copyLatestComment(ctx, targets, recent)?.let { Draft(it, false) } ?: run {
             // 直播间里全是系统提示/广告/表情时，复制模式会拿不到一条能用的正文。
             // 这时候改发预设话术，比直接中止整个流程合理——用户要的是「互动」，不是「必须复制」。
-            val fallback = presets.filter { it != lastComment }.ifEmpty { presets }.randomOrNull()
+            val fallback = pickPreset(presets, recent)
             if (fallback != null) {
                 LogStore.w(TAG, "复制模式本轮没有可用正文（系统提示/广告/重复已全部排除），改发预设话术")
             }
-            fallback
+            fallback?.let { Draft(it, true) }
         }
     }
 
-    private fun copyLatestComment(ctx: FlowContext, targets: LiveTargets, lastComment: String): String? {
+    /**
+     * 挑一条预设话术，避开 [recent] 窗口里刚发过的。窗口全遮住就把话术库原样放开
+     * （宁可重复也不空手——这一轮已经在等间隔了，再返回 null 等于白等）。
+     */
+    private fun pickPreset(presets: List<String>, recent: Collection<String>): String? {
+        if (presets.isEmpty()) return null
+        val pool = presets.filter { it !in recent }.ifEmpty { presets }
+        return pool.random()
+    }
+
+    /** 记进重复窗口：[RECENT_WINDOW] 是上限，满了丢最早的一条 */
+    private fun rememberSent(recent: ArrayDeque<String>, text: String) {
+        recent.remove(text)
+        recent.addLast(text)
+        while (recent.size > RECENT_WINDOW) recent.removeFirst()
+    }
+
+    private fun copyLatestComment(
+        ctx: FlowContext,
+        targets: LiveTargets,
+        recent: Collection<String>
+    ): String? {
         val line = targets.line ?: return null
         // collect 是按树的遍历顺序返回的，评论列表从上到下 → 最后一条就是最新的
         val bodies = ctx.actions.collect(line, MAX_COPY_SCAN)
@@ -230,11 +336,11 @@ class LiveInteractFlow : Flow {
 
         val candidate = bodies.reversed().firstOrNull { body ->
             body.length in MIN_COPY_LEN..MAX_COPY_LEN &&
-                body != lastComment &&
+                body !in recent &&
                 !isSystemish(body)
         }
         if (candidate == null) {
-            LogStore.d(TAG, "本次扫到 ${bodies.size} 条评论，没有可复制的正文（可能是系统提示或与上一条重复）")
+            LogStore.d(TAG, "本次扫到 ${bodies.size} 条评论，没有可复制的正文（可能是系统提示或与最近发过的重复）")
         }
         return candidate
     }
@@ -260,11 +366,18 @@ class LiveInteractFlow : Flow {
     /**
      * 发一条评论：点输入框 → 找**真正的输入控件** → 逐字输入 → 点发送 → 校验已提交。
      *
+     * 输入框和发送按钮都按「viewId 快路径 → 文案兜底」两组候选取（见 [Actions.findAny]）：
+     * 只有文案时要跑全树（直播间 5~7 秒），只有 viewId 则在抖音混淆资源名一改就彻底用不了。
+     *
      * 找输入控件刻意不用配置里的 comment_input（「说点什么」）：无障碍树里那句占位提示
      * 往往是一个 TextView，真正的 EditText 是另一个节点，对提示节点 SET_TEXT 必然失败。
      */
-    private suspend fun sendComment(ctx: FlowContext, targets: LiveTargets, text: String): Boolean {
-        val entry = ctx.actions.find(targets.input)
+    private suspend fun sendComment(
+        ctx: FlowContext,
+        targets: LiveTargets,
+        text: String
+    ): Boolean {
+        val entry = ctx.actions.findAny(targets.input)
         if (entry == null) {
             LogStore.w(TAG, "未找到评论输入框 ${targets.input}（直播间评论面板可能未展开）")
             return false
@@ -275,18 +388,19 @@ class LiveInteractFlow : Flow {
         }
         ctx.settle(INPUT_FOCUS_MS)
 
-        val editable = ctx.actions.findEditable()
+        // 先问「现在谁有输入焦点」（一次 IPC），没焦点才退回按 isEditable 的全树遍历
+        val editable = ctx.actions.findInputEdit()
         if (editable == null) {
             LogStore.w(TAG, "点了输入区，但屏上没有可编辑控件（面板可能没起来）")
             return false
         }
-        if (!ctx.actions.typeText(editable, text, "评论输入框") { ctx.actions.findEditable() }) {
+        if (!ctx.actions.typeText(editable, text, "评论输入框") { ctx.actions.findInputEdit() }) {
             return false
         }
 
-        val send = ctx.actions.waitFor(targets.send, SEND_WAIT_MS)
+        val send = ctx.actions.waitForFirst(targets.send, SEND_WAIT_MS)
         if (send == null) {
-            LogStore.w(TAG, "输入框里已有内容，但 ${SEND_WAIT_MS}ms 内没等到「发送」按钮")
+            LogStore.w(TAG, "输入框里已有内容，但 ${SEND_WAIT_MS}ms 内没等到「发送」按钮 ${targets.send}")
             return false
         }
         if (!ctx.actions.tapNode(send, "发送按钮")) {
@@ -302,23 +416,44 @@ class LiveInteractFlow : Flow {
     }
 
     /**
-     * 校验评论真的提交了。
+     * 校验评论真的提交了。两条判据，命中**任意一条**就算成功。
      *
-     * 判据是**输入区回到占位态**（重新出现「说点什么」）：发送成功后抖音会清空输入框并收起面板。
-     * 不校验「评论出现在列表里」——列表刷新快、自己的昵称也拿不到，反而容易误判。
+     * ① **输入区回到占位态**（重新出现「说点什么」）：发送成功后抖音会清空输入框并收起面板。
+     *    这是老判据。它的弱点是依赖那句占位文案——抖音一改版就恒真不起来，只能判失败。
+     * ② **屏上没有焦点且输入已清空**（A5 新增的正向证据）：发送成功的另一面是
+     *    「面板收起来了」，而收起来的表现就是拿不到输入焦点。这条不依赖任何文案，
+     *    只要 TikTok 不改「发完收面板」这个交互就一直成立。
+     *
+     * 两者是 **OR** 不是 AND：任何一条单独成立都足以说明「面板已经回到待输入态」。
+     * 反过来做成 AND 的话，遇到「文案改了但焦点确实丢了」的版本会把明明成功的评论判成失败，
+     * 连续 3 次就整个流程中止——那是比漏一个占位提示严重得多的方向。
+     *
+     * ⚠️ 不校验「评论出现在列表里」——列表刷新快、自己的昵称也拿不到，反而容易误判。
+     * ⚠️ 这里刻意只用**文本目标**（[LiveTargets.inputVisible]）判①，不用 viewId：
+     *    `h7l` 那个节点无论有没有输入过都挂在底栏，拿它当判据会得出「永远成功」。
      */
     private suspend fun awaitSubmitted(ctx: FlowContext, targets: LiveTargets, text: String): Boolean {
         val deadline = SystemClock.uptimeMillis() + VERIFY_TIMEOUT_MS
         while (SystemClock.uptimeMillis() < deadline) {
             if (ctx.stopped()) return false
-            if (ctx.actions.find(targets.input) != null) {
+            if (ctx.actions.findAny(targets.inputVisible) != null) {
                 LogStore.d(TAG, "输入区已回到占位态，判定「$text」已提交")
+                return true
+            }
+            val focused = ctx.actions.focusedEditable()
+            if (focused == null) {
+                LogStore.d(TAG, "评论面板已收起（无输入焦点），判定「$text」已提交")
+                return true
+            }
+            // 焦点还在但字已经没了：抖音在这种版本上「清空输入框」先于「收面板」发生
+            if (ctx.actions.textOf(focused).isNullOrEmpty()) {
+                LogStore.d(TAG, "输入框已清空，判定「$text」已提交")
                 return true
             }
             ctx.guard()
             delay(VERIFY_POLL_MS)
         }
-        LogStore.w(TAG, "发「$text」后 ${VERIFY_TIMEOUT_MS}ms 内输入区未回到占位态，按未成功处理")
+        LogStore.w(TAG, "发「$text」后 ${VERIFY_TIMEOUT_MS}ms 内两条判据都没满足，按未成功处理")
         return false
     }
 
@@ -419,22 +554,58 @@ class LiveInteractFlow : Flow {
         return !ctx.stopped()
     }
 
-    /** 从配置取本流程要用的目标；缺关键项直接中止，不做静默降级 */
+    /**
+     * 定条数休息。与 [waitBeforeComment] 同一套分片，差别是**要报剩余秒数**：
+     * 60 秒的等待期间界面上一句话不变，用户会以为卡死了（M2 的休息实现就是这个毛病）。
+     *
+     * @return false 表示期间被停止
+     */
+    private suspend fun waitRest(ctx: FlowContext, totalMs: Long): Boolean {
+        var remaining = totalMs.coerceAtLeast(1_000L)
+        var sincePublish = 0L
+        while (remaining > 0) {
+            if (ctx.stopped()) return false
+            ctx.awaitResume()
+            val slice = minOf(remaining, ctx.humanizer.longIn(SLICE_MIN_MS, SLICE_MAX_MS))
+            ctx.settle(slice)
+            remaining -= slice
+            sincePublish += slice
+            if (sincePublish >= REST_PUBLISH_EVERY_MS && remaining > 0) {
+                sincePublish = 0
+                ctx.publish(message = "休息中，还有 ${remaining / 1000}s")
+            }
+        }
+        return !ctx.stopped()
+    }
+
+    /**
+     * 从配置取本流程要用的目标；缺关键项直接中止，不做静默降级。
+     *
+     * [input] / [send] 是**候选链**（viewId 在前、文案兜底在后），见 [Actions.findAny]；
+     * [inputVisible] 单独留一条纯文案目标，只用于「面板有没有收起来」的判据
+     * （viewId 节点恒在，不能当这个判据，见 [awaitSubmitted]）。
+     */
     private class LiveTargets(
-        val input: Target,
-        val send: Target,
+        val input: List<Target>,
+        val send: List<Target>,
+        val inputVisible: List<Target>,
         val mic: Target?,
         val line: Target?
     ) {
         companion object {
             fun from(config: LocatorConfig): LiveTargets {
-                val input = config.target("comment_input")
-                    ?: throw FlowAbortException("定位配置缺少 comment_input，无法找到评论输入框")
-                val send = config.target("live_comment_send")
+                val fallback = config.target("comment_input")
+                    ?: throw FlowAbortException("定位配置缺少 comment_input，无法判断评论面板是否已收起")
+                val sendFallback = config.target("live_comment_send")
                     ?: throw FlowAbortException("定位配置缺少 live_comment_send，无法点发送")
+                val input = listOfNotNull(config.target("comment_input_fast"), fallback)
+                val send = listOfNotNull(config.target("live_comment_send_fast"), sendFallback)
+                if (input.size > 1) LogStore.d(TAG, "评论输入框启用 viewId 快路径（${input.first()}）")
+                if (send.size > 1) LogStore.d(TAG, "发送按钮启用 viewId 快路径（${send.first()}）")
                 return LiveTargets(
                     input = input,
                     send = send,
+                    inputVisible = listOf(fallback),
                     mic = config.target("live_mic_button"),
                     line = config.target("live_comment_line")
                 )
@@ -445,15 +616,19 @@ class LiveInteractFlow : Flow {
     private companion object {
         const val TAG = "直播互动"
 
-        /** 与界面一致：0=手动进入 1=系统推荐 */
-        const val ENTER_MANUAL = 0
-
         /** 与界面一致：0=复制评论 1=预设评论 */
         const val COMMENT_PRESET = 1
 
         const val MAX_COPY_SCAN = 15
         const val MIN_COPY_LEN = 2
         const val MAX_COPY_LEN = 20
+
+        /**
+         * 重复窗口：多少条之内不重发同一句话。
+         * 6 的依据是真机基线（6 条里撞了 3 次）；不取更大值是因为短话术库会被整窗口遮住，
+         * 那时 [pickPreset] 会把话术库原样放开，等于这项保护失效。
+         */
+        const val RECENT_WINDOW = 6
 
         const val MAX_CONTENT_FAILS = 3
         const val MAX_SEND_FAILS = 3
@@ -489,6 +664,9 @@ class LiveInteractFlow : Flow {
 
         const val SLICE_MIN_MS = 600L
         const val SLICE_MAX_MS = 1_200L
+
+        /** 休息期间每隔多久报一次剩余秒数 */
+        const val REST_PUBLISH_EVERY_MS = 10_000L
 
         /** 复制模式要剔除的系统提示片段 */
         val SYSTEM_HINTS = listOf(

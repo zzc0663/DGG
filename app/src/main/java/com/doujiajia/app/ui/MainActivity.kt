@@ -659,13 +659,30 @@ class MainActivity : AppCompatActivity() {
     private fun bindLive(s: Settings) {
         val c = binding.contentAuto
 
-        bindSegmented(
-            listOf(c.segEnterManual, c.segEnterRecommend), s.enterMode, grouped = false
-        ) { index -> store.edit { it.copy(enterMode = index) } }
+        // vc60 起删掉「进入方式」这行：另一个选项「系统推荐」从来没有实现过
+        // （要回首页 → 在推荐流里认直播卡 → 点进去，缺一套直播卡的特征），
+        // 选它就只会打一条「本版本只支持手动进入」然后按手动跑。留着就是让用户对着假选项做选择。
 
         bindSwitch(c.swMicRequest, s.micRequest) { v -> store.edit { it.copy(micRequest = v) } }
         // 这五个框原来是 [bindIntField]（**零约束**）：填 0 会得到「评论间隔 0 秒」= 刷屏、
         // 「点赞 0 个」= 点了不算数，而且全程没有任何提示。统一接上有范围的原语。
+        bindRangedIntField(
+            c.etCommentTarget, s.commentTarget,
+            Settings.COMMENT_TARGET_MIN, Settings.COMMENT_TARGET_MAX
+        ) { v -> store.edit { it.copy(commentTarget = v) } }
+        bindRangedIntField(
+            c.etCommentDailyLimit, s.commentDailyLimit,
+            Settings.COMMENT_DAILY_MIN, Settings.COMMENT_DAILY_MAX
+        ) { v -> store.edit { it.copy(commentDailyLimit = v) } }
+        bindSwitch(c.swCommentRest, s.restComment) { v -> store.edit { it.copy(restComment = v) } }
+        bindRangedIntField(
+            c.etCommentRestAfterN, s.commentRestAfterN,
+            Settings.COMMENT_REST_AFTER_N_MIN, Settings.COMMENT_REST_AFTER_N_MAX
+        ) { v -> store.edit { it.copy(commentRestAfterN = v) } }
+        bindRangedIntField(
+            c.etCommentRestSeconds, s.commentRestSeconds,
+            Settings.COMMENT_REST_SECONDS_MIN, Settings.COMMENT_REST_SECONDS_MAX
+        ) { v -> store.edit { it.copy(commentRestSeconds = v) } }
         bindRangedIntField(
             c.etCommentGapMin, s.commentGapMin, Settings.COMMENT_GAP_MIN, Settings.COMMENT_GAP_MAX
         ) { v -> store.edit { it.copy(commentGapMin = v) } }
@@ -689,6 +706,10 @@ class MainActivity : AppCompatActivity() {
             store.edit { it.copy(commentMode = index) }
             c.tvCommentModeDesc.text = commentModeDescriptions.getOrElse(index) { "" }
         }
+        // 必须在绑定时先写一次：说明文案原本只在**点击切换**时更新，
+        // 而 vc60 把默认模式从「复制」改成了「预设」——不补这一行，冷启动第一眼
+        // 进来看见的就是「已选预设评论 + 说明写着自动复制」，两句话互相矛盾。
+        c.tvCommentModeDesc.text = commentModeDescriptions.getOrElse(s.commentMode) { "" }
     }
 
     // ---- 绑定原语 ----
@@ -1526,12 +1547,19 @@ class MainActivity : AppCompatActivity() {
         val mode = if (s.commentMode == 1) "预设评论" else "复制最新评论"
         val likeLine = "· 每 **${s.likeTrigger}** 条赞 **${s.likeCountMin}~${s.likeCountMax}** 次" +
             (if (s.micRequest) " · 申请连麦" else "")
+        // 休息是「节奏」，用户要在一开始就知道会不会被自动暂停（否则跑到一半以为卡死）
+        val restLine = if (s.restComment) {
+            "· 每 **${s.commentRestAfterN}** 条休息 **${s.commentRestSeconds}** 秒"
+        } else {
+            "· 不会自动休息"
+        }
         showKeyConfirm(
             "开始直播互动",
             "· **请先手动进入目标直播间，停在直播画面上**\n" +
+                "· 本轮 **${s.commentTarget}** 条，今日上限 **${s.commentDailyLimit}** 条\n" +
                 "· 每 **${s.commentGapMin}~${s.commentGapMax}** 秒发 1 条（$mode）\n" +
-                likeLine + "\n" +
-                "· 无总量目标，手动停止；遇「评论过快」类提示立刻停机"
+                restLine + " · " + likeLine.drop(2) + "\n" +
+                "· 遇「评论过快」类提示立刻停机，且不会自动重试"
         ) { startFlow(LiveInteractFlow(), "已启动直播互动") }
     }
 

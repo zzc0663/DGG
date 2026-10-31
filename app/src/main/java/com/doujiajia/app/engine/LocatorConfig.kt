@@ -23,6 +23,17 @@ data class Target(
         DESC("desc"),
         DESC_CONTAINS("descContains"),
         ID("id"),
+
+        /**
+         * 按 viewId 快速通道定位，[value] 是**裸资源名**（如 `h7l`）。
+         *
+         * 走 `rootInActiveWindow.findAccessibilityNodeInfosByViewId`（一次 IPC，3~14ms），
+         * 而不是全树 BFS 逐节点读 `viewIdResourceName`（直播间 612 节点实测 5~7 秒）。
+         * 代价：混淆后的 id 是随包版本变的（40.8.0 实测 `h7l`），抖音一升级就失效——
+         * 所以 viewId 目标**必须**配一个兜底目标（调用方先试 viewId、失败再走 textContains），
+         * 且 id 从 `uiautomator dump` 取证来，换版本要重新 dump。
+         */
+        VIEW_ID("viewId"),
         IMAGE("image"),
 
         /** 找不到别的特征时的最后手段：屏上第一个可编辑节点 */

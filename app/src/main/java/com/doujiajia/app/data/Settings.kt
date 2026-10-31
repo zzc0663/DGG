@@ -61,8 +61,6 @@ data class Settings(
     val nurturePace: Int = PACE_NORMAL,
 
     // ===== 直播互动 =====
-    /** 进入方式：0=手动进入 1=系统推荐 */
-    val enterMode: Int = 0,
     val micRequest: Boolean = false,
     val commentGapMin: Int = 5,
     val commentGapMax: Int = 15,
@@ -71,7 +69,15 @@ data class Settings(
     val likeCountMin: Int = 5,
     val likeCountMax: Int = 10,
     /** 评论模式：0=复制评论 1=预设评论 */
-    val commentMode: Int = 0
+    val commentMode: Int = 1,
+    /** 本轮目标条数：发满即正常结束（状态条的分母） */
+    val commentTarget: Int = 20,
+    /** 当日累计评论上限：到点不再允许启动 / 进行中的流程直接收尾 */
+    val commentDailyLimit: Int = 200,
+    /** 定时休息开关：每发 N 条休息 M 秒 */
+    val restComment: Boolean = true,
+    val commentRestAfterN: Int = 10,
+    val commentRestSeconds: Int = 60
 ) {
 
     /**
@@ -143,6 +149,20 @@ data class Settings(
         const val LIKE_TRIGGER_MAX = 50
         const val LIKE_COUNT_MIN = 1
         const val LIKE_COUNT_MAX = 200
+
+        /**
+         * 安全阀（vc60 新增）。M3 是唯一没有闸的流程（基线 `R-20261031-184122`：97 秒发了 6 条、
+         * 其中同一句重复 3 次）——评论是抖音审核最严的动作，无限循环等于把「临时限流」
+         * 升级成「封号」的捷径。
+         */
+        const val COMMENT_TARGET_MIN = 1
+        const val COMMENT_TARGET_MAX = 2000
+        const val COMMENT_DAILY_MIN = 1
+        const val COMMENT_DAILY_MAX = 2000
+        const val COMMENT_REST_AFTER_N_MIN = 1
+        const val COMMENT_REST_AFTER_N_MAX = 500
+        const val COMMENT_REST_SECONDS_MIN = 1
+        const val COMMENT_REST_SECONDS_MAX = 600
 
         /** 某单位下数值的合法上限：秒 → 3600，分钟 → 60 */
         fun scanValueMax(unit: Int): Int =

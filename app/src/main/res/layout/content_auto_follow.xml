@@ -306,7 +306,8 @@
                 style="@style/TxtSection"
                 android:text="直播互动" />
 
-            <!-- 1. 进入方式 -->
+            <!-- 1. 本轮目标：以前这个循环是 while(true)，跑到报错或手动停为止。
+                 没有它，直播间没人说话时也会一路发下去，发到被平台限流为止。 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -314,9 +315,23 @@
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
+                <!-- 「本轮目标」略成「目标」：1.3 倍字号下实测这一行的内容宽 1026px > 卡片可用 912px，
+                     LinearLayout 会把第二个输入框从 180px 挤到 131px（与第一个明显不等宽）。
+                     去掉 2 个字后有 ~74px 余量，两个框在任何字号下都等宽。 -->
                 <TextView
                     style="@style/TxtFieldLabel"
-                    android:text="进入方式" />
+                    android:text="目标" />
+
+                <EditText
+                    android:id="@+id/et_comment_target"
+                    style="@style/InputMini"
+                    android:layout_marginStart="6dp"
+                    android:text="20" />
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:layout_marginStart="6dp"
+                    android:text="条" />
 
                 <Space
                     android:layout_width="0dp"
@@ -324,15 +339,20 @@
                     android:layout_weight="1" />
 
                 <TextView
-                    android:id="@+id/seg_enter_manual"
-                    style="@style/SegChip"
-                    android:text="手动进入" />
+                    style="@style/TxtFieldLabel"
+                    android:layout_marginStart="10dp"
+                    android:text="每日上限" />
+
+                <EditText
+                    android:id="@+id/et_comment_daily_limit"
+                    style="@style/InputMini"
+                    android:layout_marginStart="6dp"
+                    android:text="200" />
 
                 <TextView
-                    android:id="@+id/seg_enter_recommend"
-                    style="@style/SegChip"
+                    style="@style/TxtFieldLabel"
                     android:layout_marginStart="6dp"
-                    android:text="系统推荐" />
+                    android:text="条" />
             </LinearLayout>
 
             <!-- 2. 评论间隔 -->
@@ -521,6 +541,60 @@
                     style="@style/TxtFieldLabel"
                     android:layout_marginStart="6dp"
                     android:text="个" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+            </LinearLayout>
+
+            <!-- 9. 定时休息：评论比关注更容易触发频控，这里的休息是节奏不是点缀。
+                 行内一行排完（开关 + 每 N 条 + 休息 N 秒），与上方「关注」区同一版式。 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <!-- 同理：「定时休息」→「休息」、「条休息」→「条」。
+                     原文案两行放在一起会重复（定时休息 … 条休息），短文案反而更好读。 -->
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:text="休息" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/sw_comment_rest"
+                    style="@style/AppSwitch"
+                    android:layout_marginStart="6dp"
+                    android:checked="true" />
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:layout_marginStart="10dp"
+                    android:text="每" />
+
+                <EditText
+                    android:id="@+id/et_comment_rest_after_n"
+                    style="@style/InputMini"
+                    android:layout_marginStart="6dp"
+                    android:text="10" />
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:layout_marginStart="6dp"
+                    android:text="条" />
+
+                <EditText
+                    android:id="@+id/et_comment_rest_seconds"
+                    style="@style/InputMini"
+                    android:layout_marginStart="6dp"
+                    android:text="60" />
+
+                <TextView
+                    style="@style/TxtFieldLabel"
+                    android:layout_marginStart="6dp"
+                    android:text="秒" />
 
                 <Space
                     android:layout_width="0dp"

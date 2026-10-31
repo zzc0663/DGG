@@ -284,6 +284,15 @@
       "type": "textContains",
       "value": "说点什么"
     },
+    "_live_fast_path": "下面两个 viewId 是抖音 40.8.0 实测的混淆资源名（uiautomator dump 取证），换代即失效。它们是**快路径不是唯一路径**：流程按 [viewId, 文本] 顺序试，命中第一个就算数，所以 id 失效的结果是变慢（走全树遍历）而不是跑不了。新增时必须配对的文本兜底一起留着。",
+    "comment_input_fast": {
+      "type": "viewId",
+      "value": "h7l"
+    },
+    "live_comment_send_fast": {
+      "type": "viewId",
+      "value": "46-"
+    },
     "live_comment_send": {
       "type": "text",
       "value": "发送"

@@ -59,7 +59,6 @@ class SettingsStore private constructor(context: Context) {
             probShare = sp.getInt(KEY_PROB_SHARE, d.probShare),
             nurtureTags = sp.getString(KEY_NURTURE_TAGS, d.nurtureTags).orEmpty(),
             nurturePace = sp.getInt(KEY_NURTURE_PACE, d.nurturePace),
-            enterMode = sp.getInt(KEY_ENTER_MODE, d.enterMode),
             micRequest = sp.getBoolean(KEY_MIC_REQUEST, d.micRequest),
             commentGapMin = sp.getInt(KEY_GAP_MIN, d.commentGapMin),
             commentGapMax = sp.getInt(KEY_GAP_MAX, d.commentGapMax),
@@ -67,7 +66,12 @@ class SettingsStore private constructor(context: Context) {
             likeTrigger = sp.getInt(KEY_LIKE_TRIGGER, d.likeTrigger),
             likeCountMin = sp.getInt(KEY_LIKE_MIN, d.likeCountMin),
             likeCountMax = sp.getInt(KEY_LIKE_MAX, d.likeCountMax),
-            commentMode = sp.getInt(KEY_COMMENT_MODE, d.commentMode)
+            commentMode = sp.getInt(KEY_COMMENT_MODE, d.commentMode),
+            commentTarget = sp.getInt(KEY_COMMENT_TARGET, d.commentTarget),
+            commentDailyLimit = sp.getInt(KEY_COMMENT_DAILY, d.commentDailyLimit),
+            restComment = sp.getBoolean(KEY_REST_COMMENT, d.restComment),
+            commentRestAfterN = sp.getInt(KEY_COMMENT_REST_N, d.commentRestAfterN),
+            commentRestSeconds = sp.getInt(KEY_COMMENT_REST_SEC, d.commentRestSeconds)
         )
     }
 
@@ -91,7 +95,6 @@ class SettingsStore private constructor(context: Context) {
             .putInt(KEY_PROB_SHARE, s.probShare)
             .putString(KEY_NURTURE_TAGS, s.nurtureTags)
             .putInt(KEY_NURTURE_PACE, s.nurturePace)
-            .putInt(KEY_ENTER_MODE, s.enterMode)
             .putBoolean(KEY_MIC_REQUEST, s.micRequest)
             .putInt(KEY_GAP_MIN, s.commentGapMin)
             .putInt(KEY_GAP_MAX, s.commentGapMax)
@@ -100,6 +103,11 @@ class SettingsStore private constructor(context: Context) {
             .putInt(KEY_LIKE_MIN, s.likeCountMin)
             .putInt(KEY_LIKE_MAX, s.likeCountMax)
             .putInt(KEY_COMMENT_MODE, s.commentMode)
+            .putInt(KEY_COMMENT_TARGET, s.commentTarget)
+            .putInt(KEY_COMMENT_DAILY, s.commentDailyLimit)
+            .putBoolean(KEY_REST_COMMENT, s.restComment)
+            .putInt(KEY_COMMENT_REST_N, s.commentRestAfterN)
+            .putInt(KEY_COMMENT_REST_SEC, s.commentRestSeconds)
             .apply()
     }
 
@@ -142,7 +150,7 @@ class SettingsStore private constructor(context: Context) {
         private const val KEY_PROB_SHARE = "prob_share"
         private const val KEY_NURTURE_TAGS = "nurture_tags"
         private const val KEY_NURTURE_PACE = "nurture_pace"
-        private const val KEY_ENTER_MODE = "enter_mode"
+        // vc60 起删除：enter_mode（「系统推荐」从未实现，选项整行删除）。
         private const val KEY_MIC_REQUEST = "mic_request"
         private const val KEY_GAP_MIN = "gap_min"
         private const val KEY_GAP_MAX = "gap_max"
@@ -151,6 +159,11 @@ class SettingsStore private constructor(context: Context) {
         private const val KEY_LIKE_MIN = "like_min"
         private const val KEY_LIKE_MAX = "like_max"
         private const val KEY_COMMENT_MODE = "comment_mode"
+        private const val KEY_COMMENT_TARGET = "comment_target"
+        private const val KEY_COMMENT_DAILY = "comment_daily_limit"
+        private const val KEY_REST_COMMENT = "rest_comment"
+        private const val KEY_COMMENT_REST_N = "comment_rest_after_n"
+        private const val KEY_COMMENT_REST_SEC = "comment_rest_seconds"
 
         @Volatile
         private var instance: SettingsStore? = null
