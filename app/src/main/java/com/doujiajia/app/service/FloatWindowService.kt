@@ -27,6 +27,9 @@ import com.doujiajia.app.engine.EngineProgress
 import com.doujiajia.app.engine.EngineState
 import com.doujiajia.app.engine.TaskEngine
 import com.doujiajia.app.engine.TouchGuard
+import com.doujiajia.app.data.InteractStore
+import com.doujiajia.app.engine.TargetKind
+import com.doujiajia.app.engine.liveTargetOf
 import com.doujiajia.app.engine.withLiveTarget
 import android.view.inputmethod.InputMethodManager
 import com.doujiajia.app.ui.AppVisibility
@@ -653,10 +656,12 @@ class FloatWindowService : Service() {
         // progress.target 是流程启动时（以及上一轮 publish 时）冻结的快照：用户在面板上
         // 「设置关注」改了目标数，这个字段不会跟着变，界面上就是「输入人数后毫无变化」
         // （2026-10-29 真机复现：改成 300、点确定，大号计数仍是 0/200）。
-        // target == 0 是流程**明确声明「没有总量目标」**（直播互动、养号都这么发），
-        // 这时只能显示纯计数，不能拿关注目标凑个分母。
-        val current = SettingsStore.get(this).current
-        val live = progress.withLiveTarget(current.followTarget)
+        //
+        // 取哪一档设置由 [EngineProgress.targetKind] 决定：M2 是关注目标、M3 是评论目标。
+        // 直接写死 `current.followTarget` 会让 M3「目标 3 条」显示成 3/200
+        // （2026-11-01 真机实测，用户当场怀疑闸门没生效）。
+        // target == 0 是流程**明确声明「没有总量目标」**（养号这么发），只显示纯计数。
+        val live = progress.withLiveTarget(progress.liveTargetOf(this))
         val target = live.target
 
         b.floatStatus.text = shortStatus(live, target)
@@ -681,8 +686,23 @@ class FloatWindowService : Service() {
         // 养号流程会带出点赞/收藏数（关注流程一直是 0）：有数就把这两格换掉，
         // 「今日 X」「已关 Y」对养号没有意义，继续显示反而让人以为脚本在关注别人。
         val interacting = progress.liked > 0 || progress.collected > 0
-        b.floatToday.text = if (interacting) "赞 ${progress.liked}" else "今日 $today"
-        b.floatKnown.text = if (interacting) "藏 ${progress.collected}" else "已关 ${store.knownCount()}"
+        when {
+            interacting -> {
+                b.floatToday.text = "赞 ${progress.liked}"
+                b.floatKnown.text = "藏 ${progress.collected}"
+            }
+            // M3 的两格必须是**评论**口径：FollowedStore 的「今日」是今日关注数，
+            // 发完 3 条评论后显示「今日 0」会让人以为一条都没发出去（2026-11-01 真机实测）。
+            progress.targetKind == TargetKind.COMMENT -> {
+                val s = SettingsStore.get(this).current
+                b.floatToday.text = "今日 ${InteractStore.get(this).todayCount()}"
+                b.floatKnown.text = "上限 ${s.commentDailyLimit}"
+            }
+            else -> {
+                b.floatToday.text = "今日 $today"
+                b.floatKnown.text = "已关 ${store.knownCount()}"
+            }
+        }
 
         val active = progress.state.isActive
         // 三种暂停（手动 / 自愈等待）都显示「继续」；异常终止给「重试」；

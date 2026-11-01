@@ -12,8 +12,8 @@ import com.doujiajia.app.engine.Flow
 import com.doujiajia.app.engine.FlowAbortException
 import com.doujiajia.app.engine.FlowContext
 import com.doujiajia.app.engine.LocatorConfig
-import com.doujiajia.app.engine.PageState
 import com.doujiajia.app.engine.Target
+import com.doujiajia.app.engine.TargetKind
 import com.doujiajia.app.util.Texts
 import kotlinx.coroutines.delay
 
@@ -40,6 +40,14 @@ class LiveInteractFlow : Flow {
 
     override val name = "直播互动"
 
+    /**
+     * 分母是**评论**目标，不是关注目标。
+     *
+     * 不声明这一条时，悬浮窗/通知栏会拿 `followTarget`（关注数量）当分母，
+     * 目标设 3 条却显示「3/200」——看着像闸门完全没生效（2026-11-01 真机实测）。
+     */
+    override val targetKind = TargetKind.COMMENT
+
     override suspend fun run(ctx: FlowContext) {
         val settings = ctx.settings
         val targets = LiveTargets.from(ctx.config)
@@ -63,14 +71,6 @@ class LiveInteractFlow : Flow {
             }
         }
 
-        val detection = ctx.detector.detect()
-        if (detection.page != PageState.LIVE_ROOM) {
-            throw FlowAbortException(
-                "开始前必须停在直播间画面。当前页面判定 ${detection.page.name}" +
-                    "（${detection.score}/${detection.threshold}）。请手动进入目标直播间后再开始"
-            )
-        }
-
         val presets = PresetComments.load(ctx.appContext)
         if (settings.commentMode == COMMENT_PRESET && presets.isEmpty()) {
             throw FlowAbortException(
@@ -83,6 +83,20 @@ class LiveInteractFlow : Flow {
         if (remaining <= 0) {
             throw FlowAbortException(
                 "今日评论已达上限 ${settings.commentDailyLimit}（已发 ${store.todayCount()} 条），明天再跑"
+            )
+        }
+
+        // 开始前必须真的在直播间——但**不能拿 `detect()` 当判据**：
+        // 用户点「只跑直播互动」的瞬间前台是本 App，detector 只可能给出 UNKNOWN，
+        // vc60 首版就因此 100% 直接 abort，M3 从界面根本起不来（2026-11-01 实测）。
+        // 交给 LiveGuard：它先把抖音拉回前台，再等页面稳定到直播间，必要时点进房。
+        // 这里允许自动导航——用户刚刚明确点过开始，属于「已表达意图」的场合。
+        // 放在本地校验（话术库/每日额度）**之后**：那几项能直接判死，不必先切一次前台。
+        if (!ensureLiveRoom(ctx, allowAutoNavigate = true)) {
+            val now = ctx.detector.detect()
+            throw FlowAbortException(
+                "开始前必须停在直播间画面（当前判定 ${now.page.name}，${now.score}/${now.threshold}）。" +
+                    "已尝试把抖音拉回前台但未落在直播间，请手动进入目标直播间后再开始"
             )
         }
 
@@ -270,7 +284,10 @@ class LiveInteractFlow : Flow {
      * 走 [LiveGuard.ensureOnAirOrWait]：页面**整个读不出来**（未识别的全屏浮层，实测有
      * 「人气开场」助力页）时不再直接终止，而是暂停 + 持续探测，浮层一没就自动接着发评论。
      */
-    private suspend fun ensureLiveRoom(ctx: FlowContext): Boolean = LiveGuard.ensureOnAirOrWait(ctx)
+    private suspend fun ensureLiveRoom(
+        ctx: FlowContext,
+        allowAutoNavigate: Boolean = false
+    ): Boolean = LiveGuard.ensureOnAirOrWait(ctx, allowAutoNavigate)
 
     // ==================== 评论内容 ====================
 

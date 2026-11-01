@@ -17,6 +17,7 @@ import com.doujiajia.app.data.LogStore
 import com.doujiajia.app.data.SettingsStore
 import com.doujiajia.app.engine.EngineProgress
 import com.doujiajia.app.engine.TaskEngine
+import com.doujiajia.app.engine.liveTargetOf
 import com.doujiajia.app.engine.withLiveTarget
 import com.doujiajia.app.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
@@ -123,7 +124,7 @@ class ControlService : Service() {
      * 不再重复状态：标题已经是「抖加加 · 运行中」，正文里再来一句「运行中 · 」纯属占位。
      */
     private fun liveBrief(progress: EngineProgress): String =
-        progress.withLiveTarget(SettingsStore.get(this).current.followTarget).brief(includeState = false)
+        progress.withLiveTarget(progress.liveTargetOf(this)).brief(includeState = false)
 
     private fun buildNotification(progress: EngineProgress): Notification {
         val openApp = PendingIntent.getActivity(

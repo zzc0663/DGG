@@ -21,6 +21,14 @@ interface Flow {
 
     val name: String
 
+    /**
+     * 本流程的进度分母取自哪一档设置。
+     *
+     * 由 Flow 自己声明，理由和 [FlowContext.publish] 的 `counterLabel` 一样：
+     * 同一个计数/目标字段被三条业务线复用，只有业务自己知道数字的真实含义。
+     */
+    val targetKind: TargetKind get() = TargetKind.FOLLOW
+
     suspend fun run(ctx: FlowContext)
 }
 
@@ -66,7 +74,9 @@ class FlowContext(
         stepTotal: Int? = null,
         /** 养号专用：点赞/收藏的累计数。传 null 表示不改（其余流程不关心这两个数） */
         liked: Int? = null,
-        collected: Int? = null
+        collected: Int? = null,
+        /** 分母来源。通常由 [Flow.targetKind] 在启动时写入一次，流程内不必每轮重复 */
+        targetKind: TargetKind? = null
     ) {
         mutate { p ->
             p.copy(
@@ -80,6 +90,7 @@ class FlowContext(
                 stepTotal = stepTotal ?: p.stepTotal,
                 liked = liked ?: p.liked,
                 collected = collected ?: p.collected,
+                targetKind = targetKind ?: p.targetKind,
                 updatedAt = System.currentTimeMillis()
             )
         }

@@ -117,15 +117,29 @@ object TaskEngine {
         paused = false
         stopRequested = false
         finished.set(false)
+        // 初值也按流程类型给：M3 拿关注目标 200 当初始分母，会和它随后 publish 的 3 打架
+        // （真机表现为悬浮窗闪一下 0/200 再变，看着像闸门没生效）
+        val initialTarget = when (flow.targetKind) {
+            TargetKind.COMMENT -> settings.commentTarget
+            TargetKind.NONE -> 0
+            TargetKind.FOLLOW -> settings.followTarget
+        }
         _progress.value = EngineProgress(
             state = EngineState.RUNNING,
-            target = settings.followTarget,
+            target = initialTarget,
+            targetKind = flow.targetKind,
             message = "启动中",
             updatedAt = System.currentTimeMillis()
         )
+        val quotaText = when (flow.targetKind) {
+            TargetKind.COMMENT ->
+                "评论目标 ${settings.commentTarget}，每日评论上限 ${settings.commentDailyLimit}"
+            TargetKind.NONE -> "无总量目标"
+            TargetKind.FOLLOW -> "目标 ${settings.followTarget}，每日上限 ${settings.dailyLimit}"
+        }
         LogStore.i(
             TAG,
-            "启动流程「${flow.name}」：目标 ${settings.followTarget}，每日上限 ${settings.dailyLimit}，" +
+            "启动流程「${flow.name}」：$quotaText，" +
                 "抖动 ±${Settings.HUMANIZE_JITTER}%，扫描间隔 ${settings.scanIntervalLabel}"
         )
 

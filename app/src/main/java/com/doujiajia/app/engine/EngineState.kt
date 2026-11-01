@@ -40,6 +40,28 @@ enum class EngineState {
         }
 }
 
+/**
+ * 进度分母该回到哪一档设置里去取。
+ *
+ * 三条业务线的「额度」存在不同字段：M2 关注是 `Settings.followTarget`、M3 评论是
+ * `Settings.commentTarget`（还要受每日上限压），M4 养号根本没有总量目标。
+ * 而 `EngineProgress.target` 只是**启动那一刻的快照**——悬浮窗/通知栏要「用户改了立刻反映」
+ * 就必须知道回去读哪个字段。
+ *
+ * 2026-11-01 真机实测踩到的就是没这个标识：M3 目标设成 3 条，悬浮窗却显示「3/200」
+ * （200 是关注目标），看起来像闸门没生效。
+ */
+enum class TargetKind {
+    /** M2 关注：分母 = [com.doujiajia.app.data.Settings.followTarget] */
+    FOLLOW,
+
+    /** M3 直播互动：分母 = min(commentTarget, 今日剩余评论额度) */
+    COMMENT,
+
+    /** M4 养号等没有总量目标的流程：只显示纯计数 */
+    NONE
+}
+
 /** 引擎对外暴露的进度快照 */
 data class EngineProgress(
     val state: EngineState = EngineState.IDLE,
@@ -49,6 +71,8 @@ data class EngineProgress(
     val stepLabel: String = "",
     val followed: Int = 0,
     val target: Int = 0,
+    /** 分母来源，见 [TargetKind] */
+    val targetKind: TargetKind = TargetKind.FOLLOW,
     /**
      * [followed] 这个数字叫什么。
      *

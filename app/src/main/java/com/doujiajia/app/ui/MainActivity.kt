@@ -52,6 +52,7 @@ import com.doujiajia.app.engine.NurtureTags
 import com.doujiajia.app.engine.PageDetector
 import com.doujiajia.app.engine.SmokeFlow
 import com.doujiajia.app.engine.TaskEngine
+import com.doujiajia.app.engine.liveTargetOf
 import com.doujiajia.app.engine.withLiveTarget
 import com.doujiajia.app.engine.flow.FollowFromLiveFlow
 import com.doujiajia.app.engine.flow.LiveInteractFlow
@@ -1458,8 +1459,9 @@ class MainActivity : AppCompatActivity() {
         binding.engineStatusBar.visibility = if (active || needAttention) View.VISIBLE else View.GONE
         // 分母取**当前设置**：progress.target 是任务启动瞬间的快照，用户在悬浮面板上改了
         // 「设置关注」它不会跟着变，状态条就一直停在旧数字上（2026-10-29 真机复现）。
-        // target == 0 是流程声明「没有总量目标」（直播互动 / 养号），这时保留原样只看计数。
-        binding.tvEngineStatus.text = progress.withLiveTarget(store.current.followTarget).brief()
+        // 按 targetKind 分流：M3 的额度是评论目标，不是关注目标（否则显示 3/200）。
+        // target == 0 是流程声明「没有总量目标」（养号），这时保留原样只看计数。
+        binding.tvEngineStatus.text = progress.withLiveTarget(progress.liveTargetOf(this)).brief()
         binding.engineDot.setBackgroundResource(
             when {
                 progress.state == EngineState.PAUSED ||
