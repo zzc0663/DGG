@@ -201,6 +201,37 @@
                 android:text="已关闭：跑的过程中不会中途休息"
                 android:visibility="gone" />
 
+            <!-- vc61：休息期间顺手发一条评论。
+                 这一行是**真正生效**的（引擎里有消费方），下面三项仍是空壳，
+                 所以视觉上刻意分开：生效的用正常行样式，未生效的置灰 + 「暂未生效」。
+                 依赖上面的休息开关——休息关闭时这一行的开关置灰（见 bindIntervalRest）。 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    style="@style/TxtRowTitle"
+                    android:text="休息时发评论" />
+
+                <TextView
+                    style="@style/TxtRowSub"
+                    android:layout_marginStart="6dp"
+                    android:text="顺手 1 条" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/sw_rest_interact"
+                    style="@style/AppSwitch"
+                    android:checked="true" />
+            </LinearLayout>
+
             <!-- 以下三项尚未接入流程：置灰 + 明示「暂未生效」 -->
             <LinearLayout
                 android:layout_width="match_parent"

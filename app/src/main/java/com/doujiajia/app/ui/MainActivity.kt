@@ -549,6 +549,12 @@ class MainActivity : AppCompatActivity() {
             store.edit { it.copy(intervalRest = v) }
             renderIntervalRestEnabled(c, v)
         }
+        // vc61：休息期间顺手发一条评论。跟着休息开关一起置灰——休息都不开了，
+        // 这个开关永远不会触发，留着可点是"能改设置但没人消费"的假象。
+        bindSwitch(c.swRestInteract, s.restInteract) { v ->
+            store.edit { it.copy(restInteract = v) }
+            LogStore.i(TAG, "休息时发评论 = $v")
+        }
     }
 
     /** 关掉开关时不只是置灰：给一行明说的提示，否则「灰的输入框」会被当成「坏了，不能设置」。 */
@@ -557,6 +563,8 @@ class MainActivity : AppCompatActivity() {
             it.isEnabled = enabled
             it.alpha = if (enabled) 1f else 0.4f
         }
+        c.swRestInteract.isEnabled = enabled
+        c.swRestInteract.alpha = if (enabled) 1f else 0.4f
         c.tvRestOffHint.visibility = if (enabled) View.GONE else View.VISIBLE
     }
 
@@ -1533,12 +1541,21 @@ class MainActivity : AppCompatActivity() {
     /** 「开始服务」= M2 主业务：直播间评论随机关注 */
     private fun confirmFollow() {
         val s = store.current
+        // 「不刷评论」这句话在 vc61 之后不再成立：休息时可能顺手发一条。
+        // 与其含糊带过，不如按开关如实说明——用户点「开始」前有权知道脚本会说什么话。
+        val restLine = when {
+            !s.intervalRest -> "· 只做关注：不私信、不点赞、不刷评论，也不会自己找直播间\n"
+            s.restInteract ->
+                "· 每关注 **${s.restAfterN}** 个休息 **${s.restSeconds}** 秒，" +
+                    "休息时顺手发 **1 条**评论（预设话术，受每日评论上限约束）\n"
+            else -> "· 每关注 **${s.restAfterN}** 个休息 **${s.restSeconds}** 秒，休息期间不互动\n"
+        }
         showKeyConfirm(
             "开始关注",
             "· **请先手动进入目标直播间，停在直播画面上**\n" +
                 "· 目标 **${s.followTarget}** 人 · 今日上限 **${s.dailyLimit}** · " +
                 "每次间隔约 **${s.scanIntervalLabel}**（随机浮动）\n" +
-                "· 只做关注：不私信、不点赞、不刷评论，也不会自己找直播间\n" +
+                restLine +
                 "· 随时可用悬浮窗或通知栏停止"
         ) { startFlow(FollowFromLiveFlow(), "已启动直播关注") }
     }

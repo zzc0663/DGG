@@ -51,6 +51,7 @@ class SettingsStore private constructor(context: Context) {
             intervalRest = sp.getBoolean(KEY_INTERVAL_REST, d.intervalRest),
             restAfterN = sp.getInt(KEY_REST_AFTER_N, d.restAfterN),
             restSeconds = sp.getInt(KEY_REST_SECONDS, d.restSeconds),
+            restInteract = sp.getBoolean(KEY_REST_INTERACT, d.restInteract),
             runMinutes = sp.getInt(KEY_RUN_MINUTES, d.runMinutes),
             nurtureMode = sp.getInt(KEY_NURTURE_MODE, d.nurtureMode),
             probLike = sp.getInt(KEY_PROB_LIKE, d.probLike),
@@ -87,6 +88,7 @@ class SettingsStore private constructor(context: Context) {
             .putBoolean(KEY_INTERVAL_REST, s.intervalRest)
             .putInt(KEY_REST_AFTER_N, s.restAfterN)
             .putInt(KEY_REST_SECONDS, s.restSeconds)
+            .putBoolean(KEY_REST_INTERACT, s.restInteract)
             .putInt(KEY_RUN_MINUTES, s.runMinutes)
             .putInt(KEY_NURTURE_MODE, s.nurtureMode)
             .putInt(KEY_PROB_LIKE, s.probLike)
@@ -142,6 +144,7 @@ class SettingsStore private constructor(context: Context) {
         private const val KEY_INTERVAL_REST = "interval_rest"
         private const val KEY_REST_AFTER_N = "rest_after_n"
         private const val KEY_REST_SECONDS = "rest_seconds"
+        private const val KEY_REST_INTERACT = "rest_interact"
         private const val KEY_RUN_MINUTES = "run_minutes"
         private const val KEY_NURTURE_MODE = "nurture_mode"
         private const val KEY_PROB_LIKE = "prob_like"

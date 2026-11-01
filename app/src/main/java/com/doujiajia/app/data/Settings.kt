@@ -77,7 +77,21 @@ data class Settings(
     /** 定时休息开关：每发 N 条休息 M 秒 */
     val restComment: Boolean = true,
     val commentRestAfterN: Int = 10,
-    val commentRestSeconds: Int = 60
+    val commentRestSeconds: Int = 60,
+    /**
+     * **关注流程**休息时顺手发一条评论（vc61 新增）。
+     *
+     * 关注每满 N 个要歇几十秒，这段时间本来纯浪费；顺手发一条评论既省时间，
+     * 又因为是「间歇性冒个泡」而更像真人（真人不会一边关注一边完全不说话）。
+     *
+     * 与 [restComment] 的区别：那个管的是**评论流程自己的**节奏（发多了要歇），
+     * 这个管的是**关注流程的**休息间隙要不要去评论。两者共用同一本当日账
+     * （[com.doujiajia.app.data.InteractStore]）和同一个去重窗口，所以不会因为
+     * 「两条流程都开」而把 200 条上限吃穿。
+     *
+     * 默认开：休息期间发一条的风险远低于收益，且随时可关。
+     */
+    val restInteract: Boolean = true
 ) {
 
     /**

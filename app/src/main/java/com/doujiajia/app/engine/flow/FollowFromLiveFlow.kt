@@ -4,7 +4,9 @@ import android.graphics.Rect
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
 import com.doujiajia.app.data.FollowedStore
+import com.doujiajia.app.data.InteractStore
 import com.doujiajia.app.data.LogStore
+import com.doujiajia.app.data.PresetComments
 import com.doujiajia.app.data.RoomStore
 import com.doujiajia.app.data.Settings
 import com.doujiajia.app.util.CurrentRoomAnchor
@@ -13,6 +15,7 @@ import com.doujiajia.app.engine.Actions
 import com.doujiajia.app.engine.Flow
 import com.doujiajia.app.engine.FlowAbortException
 import com.doujiajia.app.engine.FlowContext
+import com.doujiajia.app.engine.LiveCommentSender
 import com.doujiajia.app.engine.LocatorConfig
 import com.doujiajia.app.engine.PageState
 import com.doujiajia.app.engine.Target
@@ -38,6 +41,14 @@ class FollowFromLiveFlow : Flow {
         val settings = ctx.settings
         val store = FollowedStore.get(ctx.appContext)
         val targets = LiveTargets.from(ctx.config)
+
+        /**
+         * 休息时发评论用的发送器。**按需创建**（Lazy）而不是一开始就 new：
+         * 它的构造会校验 `comment_input` / `live_comment_send` 两个定位项，
+         * 缺失时抛异常。用户如果只用关注、压根没打算发评论，
+         * 不该因为评论的配置不全而连关注都起不来。
+         */
+        val commentSender = lazy { LiveCommentSender(ctx.config) }
 
         if (!awaitDouyinForeground(ctx, DOUYIN_FOREGROUND_TIMEOUT_MS)) {
             throw FlowAbortException(
@@ -307,7 +318,14 @@ class FollowFromLiveFlow : Flow {
                         waitAfterFollow(ctx, 0L, "关注「$nickname」成功") { false }
                         ctx.publish(message = "已关注 $followed 个，按设置休息 ${settings.restSeconds}s")
                         LogStore.i(TAG, "到达休息点（每 ${settings.restAfterN} 个），休息 ${settings.restSeconds}s")
-                        ctx.settle(settings.restSeconds * 1_000L)
+                        // vc61：休息期间顺手发一条评论。耗时从休息里扣，**总休息时长不变**
+                        // （不扣的话这个开关会让「休息 30 秒」实际变成 35 秒，属于偷偷改用户设置）。
+                        // 开关与阈值都读**实时设置**，和 M2 其他参数的「每轮重读」保持一致：
+                        // 用户在休息点刚好改了这个开关，不该等下一轮才生效。
+                        val liveSettings = SettingsStore.get(ctx.appContext).current
+                        val interactUsedMs = interactDuringRest(ctx, liveSettings, commentSender)
+                        val restMs = (settings.restSeconds * 1_000L - interactUsedMs).coerceAtLeast(0L)
+                        if (restMs > 0) ctx.settle(restMs)
                     } else {
                         // 间隔可能长达 60 分钟：分片等待，暂停/停止才收得到。
                         // 每片顺便看一眼设置：用户在等待期间改了目标数就提前结束，
@@ -792,6 +810,77 @@ class FollowFromLiveFlow : Flow {
      * @param intervalMs 扫描间隔；传 0 表示「只刷新、不等」（休息点前的用法）
      * @param shouldInterrupt 等待期间要检查的中断条件（用户改了目标数/每日上限）
      */
+    /**
+     * 关注流程的定时休息里，顺手发一条评论。
+     *
+     * 为什么值得做：关注每满 N 个要歇几十秒到几分钟，这段时间纯浪费；
+     * 而且真人不会一边关注一边长时间一句话不说——间歇性冒个泡反而更像真人。
+     *
+     * **三重前提，缺一不发**，任何一条不成立都只是「这次不发」，绝不影响关注继续：
+     * 1. [Settings.restInteract] 开关开着；
+     * 2. 休息够长（短于 [MIN_REST_FOR_COMMENT_SEC] 不值当：点开面板→输入→校验→收面板
+     *    本身就要三到五秒，全耗在休息里等于没休息）；
+     * 3. 今日评论额度还有（与 M3 共用 [InteractStore] 同一本账）。
+     *
+     * 发送失败**只记日志**：休息期间的附加值操作，没有资格拖停主线任务。
+     *
+     * @return 本次实际消耗的毫秒数，调用方从休息时长里扣掉
+     */
+    private suspend fun interactDuringRest(
+        ctx: FlowContext,
+        settings: Settings,
+        sender: Lazy<LiveCommentSender>
+    ): Long {
+        if (!settings.restInteract) return 0L
+        if (settings.restSeconds < MIN_REST_FOR_COMMENT_SEC) return 0L
+
+        val startAt = SystemClock.uptimeMillis()
+        fun used(): Long = SystemClock.uptimeMillis() - startAt
+
+        val interactStore = InteractStore.get(ctx.appContext)
+        val remaining = interactStore.remainingToday(settings.commentDailyLimit)
+        if (remaining <= 0) {
+            LogStore.i(
+                TAG,
+                "[休息互动] 今日评论已达上限 ${settings.commentDailyLimit}（已发 ${interactStore.todayCount()}），本条跳过"
+            )
+            return used()
+        }
+
+        val draft = try {
+            sender.value.buildDraft(ctx, settings, PresetComments.load(ctx.appContext))
+        } catch (e: FlowAbortException) {
+            // 评论的定位配置不全：只影响这个附带功能，不该把关注流程拖停
+            LogStore.w(TAG, "[休息互动] 评论定位配置不完整，跳过：${e.message}")
+            return used()
+        }
+        if (draft == null) {
+            LogStore.w(TAG, "[休息互动] 拿不到可发的评论内容，本条跳过")
+            return used()
+        }
+
+        if (!sender.value.send(ctx, draft.text)) {
+            LogStore.w(TAG, "[休息互动] 发送失败：「${draft.text}」，本条跳过（关注继续）")
+            return used()
+        }
+
+        val today = sender.value.markSent(ctx, draft.text)
+        ctx.publish(message = "休息中，顺手发了条评论（今日 $today/${settings.commentDailyLimit}）")
+        LogStore.i(
+            TAG,
+            "[休息互动] 已发：「${draft.text}」（今日 $today/${settings.commentDailyLimit}，" +
+                "用时 ${used()}ms${if (draft.fromFallback) "，复制降级为预设话术" else ""}）"
+        )
+
+        // 收尾：发完评论若输入面板还开着，按一次返回把它关掉。
+        // ⚠️ 判据必须先验：无脑 back() 在面板已收起时会**退出直播间**——M2 里最贵的错。
+        if (ctx.actions.focusedEditable() != null) {
+            ctx.actions.back()
+            delay(KEYBOARD_SETTLE_MS)
+        }
+        return used()
+    }
+
     private suspend fun waitAfterFollow(
         ctx: FlowContext,
         intervalMs: Long,
@@ -979,6 +1068,7 @@ class FollowFromLiveFlow : Flow {
         var skippedLow = 0
         var skippedThin = 0
         var skippedSeen = 0
+        var skippedSelf = 0
         for ((rawName, node) in raw) {
             val name = rawName.trim()
             val bounds = ctx.actions.boundsOf(node)
@@ -1007,6 +1097,15 @@ class FollowFromLiveFlow : Flow {
             if (store.isFollowed(name)) continue
             // 判定过是私密账号的人直接排除：点开也只会再发一次没用的申请
             if (store.isPrivate(name)) continue
+            // vc61：**自己刚发的评论也会出现在评论区**，整行文案和别人的毫无区别。
+            // 不滤掉就会拿自己的昵称去关注——界面上没有「关注自己」的按钮，
+            // 结果是判失败、累计失败，严重时把整个流程拖到中止。
+            // 判据用「正文命中最近发过的内容」：可能误伤"别人恰好发了同一句"
+            // （预设话术很常见），代价只是少关注一个人，远小于去关注自己。
+            if (LiveCommentSender.isSelfBodies(Texts.afterColon(label)?.trim().orEmpty())) {
+                skippedSelf++
+                continue
+            }
             if (!fresh) {
                 skippedSeen++
                 continue
@@ -1036,7 +1135,7 @@ class FollowFromLiveFlow : Flow {
                     "（已排除：本轮已处理 ${handled.size}、历史已关注 ${store.knownCount()}、" +
                     "原已关注 ${store.alreadyCount()}、" +
                     "黑名单 ${ctx.config.excludeNicknames.size}、压输入栏 $skippedLow、行未成型 $skippedThin、" +
-                    "非首见 $skippedSeen）" +
+                    "非首见 $skippedSeen、自己发的 $skippedSelf）" +
                     "；最新 3 人 ${candidates.take(3).joinToString("、") { "${it.name}@y${it.bottomY}" }}"
             )
         }
@@ -1600,6 +1699,12 @@ class FollowFromLiveFlow : Flow {
 
         /** 关掉意外浮层后等界面收起的时长（返回动画 + 评论重新挂上节点） */
         const val OVERLAY_RETRY_MS = 1_000L
+
+        /** 休息短于这个秒数就不发评论：发一条本身要 3~5 秒，全耗在休息里等于没休息 */
+        const val MIN_REST_FOR_COMMENT_SEC = 15
+
+        /** 收键盘后等动画走完再读树（键盘收起过程中读到的树是半截的） */
+        const val KEYBOARD_SETTLE_MS = 800L
 
         /**
          * 只在最新的这么多个**可用**候选里随机挑人。
