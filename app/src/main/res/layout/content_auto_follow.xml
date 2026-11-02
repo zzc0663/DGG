@@ -35,6 +35,43 @@
             android:layout_height="wrap_content"
             android:layout_marginBottom="10dp" />
 
+        <!-- ==================== 关注记录入口（vc62） ====================
+             放在最上面是故意的：跑完任务回来第一件事就是看"刚才关注了谁"，
+             埋在参数区下面就还得滚一屏才找得到。
+             「今日 N · 累计 M」两个数并排，就是为了不再出现"这个数字到底算哪天"的疑问
+             —— 旧版只有一个永不清零的「已关 N」，跨天不变，被当成当日数。 -->
+        <LinearLayout
+            android:id="@+id/card_follow_records"
+            style="@style/CardBox"
+            android:layout_marginBottom="10dp"
+            android:clickable="true"
+            android:focusable="true"
+            android:foreground="?attr/selectableItemBackground"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                style="@style/TxtRowTitle"
+                android:text="关注记录" />
+
+            <Space
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <TextView
+                android:id="@+id/tv_record_summary"
+                style="@style/TxtRowSub"
+                android:text="今日 0 · 累计 0" />
+
+            <ImageView
+                android:layout_width="14dp"
+                android:layout_height="14dp"
+                android:layout_marginStart="6dp"
+                android:contentDescription="查看关注记录"
+                android:src="@drawable/ic_chevron_right" />
+        </LinearLayout>
+
         <!-- ==================== 参数设置 ==================== -->
         <LinearLayout
             style="@style/CardBox">

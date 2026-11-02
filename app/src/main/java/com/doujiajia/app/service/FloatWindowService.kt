@@ -700,7 +700,11 @@ class FloatWindowService : Service() {
             }
             else -> {
                 b.floatToday.text = "今日 $today"
-                b.floatKnown.text = "已关 ${store.knownCount()}"
+                // vc62：「已关」→「累计」。原来那个「已关 N」是**历史累计去重名单**的大小，
+                // 跨天不变，和左边的「今日 N」并排放在一起，很容易被读成"今天已经关注了多少"
+                // （2026-11-02 用户就是照着这个数字问"隔天没刷新"）。换个词就不会再误读。
+                // 同时改读 totalFollowed()：名单有 3000 上限，用它当累计会在 3000 处封顶。
+                b.floatKnown.text = "累计 ${store.totalFollowed()}"
             }
         }
 

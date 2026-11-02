@@ -22,6 +22,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.Lifecycle
 import com.doujiajia.app.R
+import com.doujiajia.app.data.FollowedStore
 import com.doujiajia.app.data.LogStore
 import com.doujiajia.app.data.PermissionGuard
 import com.doujiajia.app.data.PresetTags
@@ -223,6 +224,8 @@ class MainActivity : AppCompatActivity() {
         // 不同步的话两个数字会打架：用户从抖音回来看到旧值，点一下再失焦，
         // bindRangedIntField 的失焦回调还会把旧值写回去，把刚才在面板上设的值覆盖掉。
         syncEditableSettings()
+        // 关注记录入口的数字（今日/累计）：跑完任务或从记录页返回都要最新
+        renderFollowRecordSummary()
         // 状态条的分母同样依赖设置值，设置变了要重画一次（collect 只在引擎状态变化时触发）
         renderEngine(TaskEngine.progress.value)
         // 恢复向导：刚从设置页回来 → 推进到下一项（每项只跳一次，避免在设置页之间来回打转）
@@ -501,6 +504,27 @@ class MainActivity : AppCompatActivity() {
         bindAutoFollow(s)
         bindNurture(s)
         bindLive(s)
+        bindFollowRecords()
+    }
+
+    /**
+     * 「关注记录」入口（vc62）。
+     *
+     * 右侧那串「今日 N · 累计 M」必须两个数都写：旧版只有一个永不清零的「已关 N」，
+     * 跨天不变，被当成"今天的数字卡住了"（2026-11-02 用户的反馈就是这个）。
+     */
+    private fun bindFollowRecords() {
+        binding.contentAuto.cardFollowRecords.setOnClickListener {
+            startActivity(Intent(this, FollowRecordsActivity::class.java))
+        }
+        renderFollowRecordSummary()
+    }
+
+    /** 今日 / 累计两个数字。从记录页返回时 onResume 会再调一次，保证看过就更新 */
+    private fun renderFollowRecordSummary() {
+        val followed = FollowedStore.get(this)
+        binding.contentAuto.tvRecordSummary.text =
+            "今日 ${followed.todayCount()} · 累计 ${followed.totalFollowed()}"
     }
 
     private fun bindAutoFollow(s: Settings) {

@@ -16,7 +16,10 @@ import java.util.Locale
  * **代价是同名不同人会误杀**，这一点不掩盖，写在文档里。名单有上限，
  * 超过后先进先出淘汰，避免 SharedPreferences 无限膨胀。
  */
-class FollowedStore private constructor(private val prefs: SharedPreferences) {
+class FollowedStore private constructor(private val appContext: Context) {
+
+    private val prefs: SharedPreferences =
+        appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     /**
      * 去重判据 = 真正关注过的 ∪ 打开资料卡时「本来就已关注」的。
@@ -34,6 +37,13 @@ class FollowedStore private constructor(private val prefs: SharedPreferences) {
         if (!set.add(nickname)) return
         trim(set)
         prefs.edit().putString(KEY_NAMES, set.joinToString(SEPARATOR)).apply()
+
+        // vc62：三件事必须一起发生，否则三个数字会互相对不上——
+        // 名单（去重）、累计计数器（界面「累计 N」）、明细记录（关注记录页）。
+        prefs.edit().putInt(KEY_TOTAL, totalFollowed() + 1).apply()
+        // 主播昵称取 Flow 每轮刷新过的那份（anchorFromSnapshot，零额外遍历）。
+        // 关注动作发生在直播间里，此刻它就是"被关注人所在的那个直播间"。
+        FollowRecordStore.get(appContext).append(RoomStore.get(appContext).lastAnchor, nickname)
     }
 
     /**
@@ -54,6 +64,29 @@ class FollowedStore private constructor(private val prefs: SharedPreferences) {
 
     /** 本机真正关注过的人数——面板「已关 N」用的就是它 */
     fun knownCount(): Int = names().size
+
+    /**
+     * 累计关注人数（**只增不减，不淘汰**）。
+     *
+     * 为什么不直接用 [knownCount]：名单有 `MAX_NAMES = 3000` 上限，超了先进先出淘汰，
+     * 拿它当累计数会在 3000 处凭空封顶，跑量大的用户会看到数字停在 3000 再也不动。
+     * 这个计数器跟着 [markFollowed] 走，与关注记录文件同源。
+     *
+     * **首次升级要播种**：老用户升级前没有这个键，直接从 0 开始的话，「累计」会从界面上的
+     * 13 突然掉到 0（用户第一反应是"数据丢了吧"）。用现存名单大小播种一次，
+     * 之后只增不减。播种值是**近似值**（历史记录早于本次升级，无法逐条还原），
+     * 但比归零诚实——记录页里「共 N 条」是文件真实行数，两者从升级这一刻起同步增长。
+     */
+    @Synchronized
+    fun totalFollowed(): Int {
+        if (!prefs.getBoolean(KEY_TOTAL_SEEDED, false)) {
+            val seed = names().size
+            prefs.edit().putInt(KEY_TOTAL, seed).putBoolean(KEY_TOTAL_SEEDED, true).apply()
+            LogStore.i(TAG, "累计关注数首次初始化：用现有名单 $seed 人播种")
+            return seed
+        }
+        return prefs.getInt(KEY_TOTAL, 0)
+    }
 
     /** 打开时就已关注、被我们跳过的人数（**不计入**「已关」） */
     fun alreadyCount(): Int = alreadyNames().size
@@ -197,6 +230,10 @@ class FollowedStore private constructor(private val prefs: SharedPreferences) {
         private const val KEY_MIGRATED = "split_migrated_v42"
         private const val KEY_DAY = "day_key"
         private const val KEY_DAY_COUNT = "day_count"
+        /** vc62：累计关注数（只增不减，不受 [MAX_NAMES] 影响） */
+        private const val KEY_TOTAL = "total_followed"
+        /** vc62：累计数是否已用现存名单播种过（只播一次，避免老用户看到归零） */
+        private const val KEY_TOTAL_SEEDED = "total_seeded_v62"
         private const val SEPARATOR = "\n"
         private const val MAX_NAMES = 3_000
 
@@ -207,9 +244,7 @@ class FollowedStore private constructor(private val prefs: SharedPreferences) {
 
         fun get(context: Context): FollowedStore =
             instance ?: synchronized(this) {
-                instance ?: FollowedStore(
-                    context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                ).also {
+                instance ?: FollowedStore(context.applicationContext).also {
                     it.migrateLegacyOnce()
                     instance = it
                 }

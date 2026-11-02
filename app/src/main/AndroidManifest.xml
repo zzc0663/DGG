@@ -59,6 +59,16 @@
         </activity>
 
         <!--
+          关注记录页（vc62）：时间 / 主播 / 被关注人。
+          exported=false —— 只由主界面跳进来，不给外部应用启动入口。
+        -->
+        <activity
+            android:name=".ui.FollowRecordsActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <!--
           日志页已移除（2026-10-28）：日志不再允许本地查看，点「日志」直接上报云端。
           排查靠 debug 包的调试通道（files/runtime.log + DUMP 等命令）。
         -->
