@@ -9,6 +9,7 @@ import androidx.appcompat.app.AppCompatActivity
 import com.doujiajia.app.R
 import com.doujiajia.app.data.FollowRecordStore
 import com.doujiajia.app.data.FollowedStore
+import com.doujiajia.app.service.FloatWindowService
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -79,8 +80,17 @@ class FollowRecordsActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 折叠后的悬浮胶囊仍浮在左上角，正好压住本页统计卡的「今日」——
+        // 实测（2026-11-02）那个数字被整块盖住。进页面整条隐藏，离开时恢复。
+        FloatWindowService.hideTemporarily()
         renderStats(withRecordCount = !countedOnce)
         countedOnce = true
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // 回主界面或切去抖音都要把悬浮窗还回来：它在抖音里是唯一的状态入口
+        FloatWindowService.restoreAfterHide()
     }
 
     /**

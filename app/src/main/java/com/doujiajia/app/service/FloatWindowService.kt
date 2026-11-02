@@ -817,6 +817,21 @@ class FloatWindowService : Service() {
             service.setExpanded(false)
         }
 
+        /**
+         * 进入 App 内的全屏页面（如关注记录）时**整条隐藏**，离开时用 [restoreAfterHide] 恢复。
+         *
+         * 为什么收起不够：折叠后的胶囊仍浮在屏幕左上，而记录页的统计卡正好在那里——
+         * 实测（2026-11-02）「今日」那个红色数字被胶囊整块压住，等于白做。
+         * 只改可见性不动服务：任务状态继续更新，回到抖音照样能看到面板。
+         */
+        fun hideTemporarily() {
+            instance?.binding?.root?.let { it.visibility = View.GONE }
+        }
+
+        fun restoreAfterHide() {
+            instance?.binding?.root?.let { it.visibility = View.VISIBLE }
+        }
+
         /** 引擎从未启动时，悬浮窗最多空挂这么久 */
         private const val IDLE_SELF_CLOSE_MS = 5_000L
 
