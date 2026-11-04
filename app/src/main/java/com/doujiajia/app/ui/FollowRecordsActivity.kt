@@ -35,7 +35,6 @@ class FollowRecordsActivity : AppCompatActivity() {
     private var offset = 0
     private var loading = false
     private var noMore = false
-    private var lastDayKey: String? = null
 
     /** 条数要扫一遍文件，只在进页面时算一次；onResume 回来不必重扫 */
     private var countedOnce = false
@@ -109,32 +108,84 @@ class FollowRecordsActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 分页加载，**按天对齐**。
+     *
+     * 为什么不能简单地"读 300 条就渲染"：一页读满时，最后一页可能把某一天截断。
+     * 如果那天同时被分成两块，主播头的「已关注 N」就会偏小 —— 用户在一天的多次任务里
+     * 来回切房间时（A 关注 8 → B 关注 4 → 又回 A 关注 3），A 会显示成「8」和「3」两个块，
+     * 而不是「已关注 11」。
+     *
+     * 所以：一页读满时**只渲染前面完整的天**，把不完整的那天留到下一页。
+     * 默认每日上限 200 < [PAGE_SIZE] 300，正常情况下一次读就跨天，感觉不到差别。
+     */
     private fun loadMore() {
         if (loading || noMore) return
         loading = true
         val page = FollowRecordStore.get(this).read(offset, PAGE_SIZE)
         if (page.isEmpty()) {
             noMore = true
-        } else {
-            appendRows(page)
-            offset += page.size
-            if (page.size < PAGE_SIZE) noMore = true
+            loading = false
+            refresh()
+            return
         }
-        loading = false
-        adapter.submit(rows)
-        tvEmpty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
-    }
 
-    /** 按天插入日期头。记录本身是时间倒序，所以同一天一定是连续的 */
-    private fun appendRows(page: List<FollowRecordStore.Record>) {
+        // 记录是时间倒序 ⇒ 同一天天然连续，顺序切分即可
+        val days = ArrayList<MutableList<FollowRecordStore.Record>>()
+        var lastKey: String? = null
         for (r in page) {
             val key = dayFormat.format(Date(r.ts))
-            if (key != lastDayKey) {
-                rows.add(FollowRecordsAdapter.Row(dayLabel = dayLabel(key)))
-                lastDayKey = key
+            if (key != lastKey) {
+                days.add(ArrayList())
+                lastKey = key
             }
-            rows.add(FollowRecordsAdapter.Row(record = r))
+            days.last().add(r)
         }
+
+        val completeDays = if (page.size < PAGE_SIZE) days.size else days.size - 1
+        // 兜底：某一天自己就超过一页（用户把每日上限调到 300+）。这时候只能把它切块渲染，
+        // 否则 completeDays == 0 会「什么都不渲染、offset 也不推进」⇒ 卡死在这个位置。
+        val renderDays = if (completeDays <= 0) 1 else completeDays
+
+        var consumed = 0
+        for (i in 0 until renderDays) {
+            consumed += days[i].size
+            appendDay(days[i])
+        }
+        offset += consumed
+        if (page.size < PAGE_SIZE) noMore = true
+
+        loading = false
+        refresh()
+    }
+
+    /** 渲染一整天：日期头 → 每个主播一个分组头 → 组内按时间倒序列出条目 */
+    private fun appendDay(records: List<FollowRecordStore.Record>) {
+        val key = dayFormat.format(Date(records[0].ts))
+        val followed = records.count { it.kind == FollowRecordStore.KIND_FOLLOW }
+        rows.add(FollowRecordsAdapter.Row.day(dayLabel(key), followed))
+
+        // 按主播聚合，保持"首次出现"顺序 —— 记录是倒序的，所以最近活跃的直播间排在前面
+        val groups = LinkedHashMap<String, MutableList<FollowRecordStore.Record>>()
+        for (r in records) {
+            if (r.kind != FollowRecordStore.KIND_FOLLOW) continue
+            groups.getOrPut(r.anchor.orEmpty()) { ArrayList() }.add(r)
+        }
+        for ((anchor, list) in groups) {
+            // 「主播」前缀在这里拼：未识别的那组自己就带「主播」二字，不能再加一遍
+            rows.add(
+                FollowRecordsAdapter.Row.anchor(
+                    if (anchor.isEmpty()) "未识别主播" else "主播 $anchor",
+                    list.size
+                )
+            )
+            list.forEach { rows.add(FollowRecordsAdapter.Row.record(it)) }
+        }
+    }
+
+    private fun refresh() {
+        adapter.submit(rows)
+        tvEmpty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
     }
 
     private fun dayLabel(key: String): String {

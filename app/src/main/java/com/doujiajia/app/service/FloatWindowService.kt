@@ -18,6 +18,7 @@ import android.view.WindowManager
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 import com.doujiajia.app.R
+import com.doujiajia.app.data.FollowRecordStore
 import com.doujiajia.app.data.FollowedStore
 import com.doujiajia.app.data.LogStore
 import com.doujiajia.app.data.RoomStore
@@ -513,32 +514,35 @@ class FloatWindowService : Service() {
         b.floatTargetBox.visibility = View.GONE
         setWindowFocusable(false)
         if (show) {
-            val store = FollowedStore.get(this)
-            val names = store.allNames()
-            val already = store.alreadyNames()
-            b.floatNamesList.text = if (names.isEmpty() && already.isEmpty()) {
-                "还没有关注过任何人"
-            } else {
-                buildString {
-                    names.take(MAX_NAMES_SHOWN).forEachIndexed { i, n ->
-                        if (i > 0) append('\n')
-                        append("${i + 1}. $n")
-                    }
-                    if (names.size > MAX_NAMES_SHOWN) {
-                        append("\n…… 共 ${names.size} 人")
-                    }
-                    // 下面这批**不是我们关注的**：打开资料卡时按钮已经是「取消关注」。
-                    // 不分开列的话，用户会把它们算进「已关」里，数字就对不上手机上的实际关注数
-                    // （2026-10-30 真机反馈的正是这个）。
-                    if (already.isNotEmpty()) {
-                        if (names.isNotEmpty()) append("\n──────────")
-                        append("\n以下 ${already.size} 人打开时已关注，未重复关注：")
-                        already.take(MAX_NAMES_SHOWN).forEach { append("\n· $it") }
-                        if (already.size > MAX_NAMES_SHOWN) append("\n…… 共 ${already.size} 人")
+            val groups = FollowRecordStore.get(this).todayGroups()
+            val already = FollowedStore.get(this).alreadyCount()
+            b.floatNamesList.text = buildString {
+                if (groups.isEmpty()) {
+                    append("今天还没有关注过任何人")
+                } else {
+                    // vc63：按主播分组。数据来自 follow_records.tsv（那里才有主播字段），
+                    // 而不是 FollowedStore 的昵称列表 —— 后者没有主播、也没有时间。
+                    groups.forEachIndexed { index, group ->
+                        if (index > 0) append('\n')
+                        append("主播 ").append(group.anchor ?: "未识别主播")
+                            .append(" · 已关注 ").append(group.count).append('\n')
+                        // 组内序号：1 2 3 … N。悬浮窗放不下昵称（一个昵称就占掉半行），
+                        // 要看具体是谁去「关注记录」页，那边按 日期→主播→条目 完整列出。
+                        append((1..group.count).joinToString(" "))
                     }
                 }
+                // 「打开时已关注」那批是**跳过的**，不计入上面的数字。
+                // 记录文件目前只写 kind=F，拿不到"今天跳过了几个"，所以这里给历史累计并**标明口径**，
+                // 不写「今天」——否则又是一个跨天不变却看着像当日数的假数字。
+                if (already > 0) {
+                    if (groups.isNotEmpty()) append("\n──────────")
+                    append("\n另有 ").append(already).append(" 人打开时本就已关注（历史累计，未重复关注）")
+                }
             }
-            LogStore.d(TAG, "展开已关名单：本机关注 ${names.size} 人、原已关注 ${already.size} 人")
+            LogStore.d(
+                TAG,
+                "展开已关名单：今天 ${groups.size} 个主播、共 ${groups.sumOf { it.count }} 人"
+            )
         }
     }
 
@@ -699,12 +703,14 @@ class FloatWindowService : Service() {
                 b.floatKnown.text = "上限 ${s.commentDailyLimit}"
             }
             else -> {
-                b.floatToday.text = "今日 $today"
-                // vc62：「已关」→「累计」。原来那个「已关 N」是**历史累计去重名单**的大小，
-                // 跨天不变，和左边的「今日 N」并排放在一起，很容易被读成"今天已经关注了多少"
-                // （2026-11-02 用户就是照着这个数字问"隔天没刷新"）。换个词就不会再误读。
-                // 同时改读 totalFollowed()：名单有 3000 上限，用它当累计会在 3000 处封顶。
-                b.floatKnown.text = "累计 ${store.totalFollowed()}"
+                // vc63：三格改成「本场 / 剩余 / 累计」。
+                // 「累计」原来是 totalFollowed（历史总数，跨天不变），用户明确要求它也跟天刷新
+                // ⇒ 改成今日累计（todayCount 读时比对日期，跨天自动归零）。
+                // 这样一来原来的「今日」格就与它重复了，换成「剩余」= 每日上限 − 今日已关 ——
+                // 这才是决定"今天还要不要继续跑"的那个数。
+                val limit = SettingsStore.get(this).current.dailyLimit
+                b.floatToday.text = "剩余 ${(limit - today).coerceAtLeast(0)}"
+                b.floatKnown.text = "累计 $today"
             }
         }
 
@@ -834,9 +840,6 @@ class FloatWindowService : Service() {
 
         /** 引擎从未启动时，悬浮窗最多空挂这么久 */
         private const val IDLE_SELF_CLOSE_MS = 5_000L
-
-        /** 「已关人数」名单最多展示条数（全量在日志里） */
-        private const val MAX_NAMES_SHOWN = 40
 
         /** 等主线程改窗口属性的上限；只用在意「手势别抢在防护生效之前」 */
         private const val TOUCH_SWITCH_AWAIT_MS = 150L

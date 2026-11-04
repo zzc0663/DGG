@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 主播分组头（vc63）：一天里按主播分块，块标题带该主播当天的关注总数 -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/tv_anchor_group"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:ellipsize="end"
+    android:maxLines="1"
+    android:paddingStart="4dp"
+    android:paddingTop="10dp"
+    android:paddingEnd="4dp"
+    android:paddingBottom="6dp"
+    android:textColor="@color/text_primary"
+    android:textSize="13sp"
+    android:textStyle="bold" />

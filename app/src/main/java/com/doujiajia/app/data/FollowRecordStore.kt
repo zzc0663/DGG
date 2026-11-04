@@ -3,6 +3,9 @@ package com.doujiajia.app.data
 import android.content.Context
 import java.io.File
 import java.io.RandomAccessFile
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * 关注记录：**时间 / 主播昵称 / 被关注人昵称**。
@@ -38,6 +41,44 @@ class FollowRecordStore private constructor(private val appContext: Context) {
         val nickname: String,
         val kind: Char = KIND_FOLLOW
     )
+
+    /** 某主播在今天被关注了多少个（悬浮窗名单区用） */
+    data class AnchorGroup(val anchor: String?, val count: Int)
+
+    /**
+     * **今天**的记录按主播聚合，最近活跃的在前。
+     *
+     * 实现要点：从文件尾部倒读，**一碰到非今天的记录就停**——不扫全文件。
+     * 单日上限 200 条，200 一批最多翻 5 次（[MAX_GROUP_SCAN_PAGES]）就够，
+     * 即使每日上限被调大也不会卡住名单展开。
+     *
+     * 只统计 [KIND_FOLLOW]：打开时就已关注、私密账号那些不算「已关注」。
+     */
+    @Synchronized
+    fun todayGroups(): List<AnchorGroup> {
+        val todayKey = dayFormat.format(Date())
+        val groups = LinkedHashMap<String, Int>()
+        var offset = 0
+        var pages = 0
+        while (pages++ < MAX_GROUP_SCAN_PAGES) {
+            val page = read(offset, GROUP_PAGE)
+            if (page.isEmpty()) break
+            var reachedOlder = false
+            for (r in page) {
+                if (dayFormat.format(Date(r.ts)) != todayKey) {
+                    reachedOlder = true
+                    break
+                }
+                if (r.kind != KIND_FOLLOW) continue
+                val key = r.anchor.orEmpty()
+                groups[key] = (groups[key] ?: 0) + 1
+            }
+            if (reachedOlder) break
+            offset += page.size
+            if (page.size < GROUP_PAGE) break
+        }
+        return groups.map { AnchorGroup(it.key.ifEmpty { null }, it.value) }
+    }
 
     /**
      * 追加一条记录。
@@ -186,6 +227,14 @@ class FollowRecordStore private constructor(private val appContext: Context) {
         /** 单次从文件尾部读的块大小：64 KB 大约 800~1000 条记录，够一页（300 条）翻三次还多 */
         private const val BLOCK = 64 * 1024
         private val NL = '\n'.code.toByte()
+
+        /** [todayGroups] 单批读多少条 */
+        private const val GROUP_PAGE = 200
+
+        /** [todayGroups] 最多翻几批就放弃（正常情况下第一批就跨天结束了） */
+        private const val MAX_GROUP_SCAN_PAGES = 5
+
+        private val dayFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
 
         const val KIND_FOLLOW = 'F'
         const val KIND_ALREADY = 'A'
